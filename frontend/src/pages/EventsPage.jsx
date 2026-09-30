@@ -1,418 +1,201 @@
-import React, { useState, useEffect } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { CheckCircle2, FilterX, Plus, RefreshCw } from 'lucide-react';
+import useUrlFilters from '../hooks/useUrlFilters';
+import usePaginatedQuery from '../hooks/usePaginatedQuery';
+import useMediaQuery from '../hooks/useMediaQuery';
+import useNow from '../hooks/useNow';
 import {
-  Activity,
-  Search,
-  Filter,
-  Eye,
-  Plus,
-  RefreshCw,
-  ChevronLeft,
-  ChevronRight,
-} from 'lucide-react';
-import { eventsApi } from '../services/api';
-import Badge from '../components/common/Badge';
+  EVENT_FILTER_SCHEMA,
+  EVENT_PAGE_SIZES,
+  EVENT_TIME_RANGES,
+  fetchEvents,
+  ingestEvent,
+} from '../features/events/eventsService';
+import { EVENT_SERVICES, EVENT_STATUSES } from '../utils/domainLabels';
+import SearchField from '../components/common/SearchField';
+import FilterSelect from '../components/common/FilterSelect';
+import Pagination from '../components/common/Pagination';
+import StateMessage from '../components/common/StateMessage';
 import Modal from '../components/common/Modal';
+import { EventCardList, EventsTable } from '../components/events/EventResults';
+import EventDetails from '../components/events/EventDetails';
+import IngestEventForm from '../components/events/IngestEventForm';
+
+const SERVICE_OPTIONS = [
+  { value: 'all', label: 'All services' },
+  ...Object.entries(EVENT_SERVICES).map(([value, { label }]) => ({ value, label })),
+];
+const STATUS_OPTIONS = [
+  { value: 'all', label: 'All statuses' },
+  ...Object.entries(EVENT_STATUSES).map(([value, { label }]) => ({ value, label })),
+];
+const RANGE_OPTIONS = Object.entries(EVENT_TIME_RANGES).map(([value, { label }]) => ({ value, label }));
+
+const TableSkeleton = ({ rows }) => (
+  <div className="skeleton-list" aria-hidden="true">
+    {Array.from({ length: Math.min(rows, 10) }, (_, i) => (
+      <div key={i} className="skeleton skeleton-row" />
+    ))}
+  </div>
+);
 
 const EventsPage = () => {
-  const [events, setEvents] = useState([]);
-  const [pagination, setPagination] = useState({ page: 1, limit: 10, total: 0, totalPages: 1 });
-  const [search, setSearch] = useState('');
-  const [service, setService] = useState('all');
-  const [status, setStatus] = useState('all');
-  const [isLoading, setIsLoading] = useState(true);
+  const { filters, updateFilters, resetFilters, activeFilterCount } = useUrlFilters(EVENT_FILTER_SCHEMA);
+  const query = usePaginatedQuery(fetchEvents, filters, 'Could not load events.');
+  const isCompact = useMediaQuery('(max-width: 699.98px)');
+  const now = useNow();
 
-  // Selected event for detail modal
   const [selectedEvent, setSelectedEvent] = useState(null);
+  const [isIngestOpen, setIsIngestOpen] = useState(false);
+  const [notice, setNotice] = useState('');
 
-  // Create new event modal state
-  const [isCreateOpen, setIsCreateOpen] = useState(false);
-  const [newEvent, setNewEvent] = useState({
-    eventType: 'payment.success',
-    service: 'payment-service',
-    status: 'success',
-    metadata: '{\n  "amount": 99.00,\n  "currency": "USD"\n}',
-  });
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const items = query.data?.items;
+  const pagination = query.data?.pagination;
+  const hasData = Boolean(query.data);
+  const isInitialLoading = query.status === 'loading' && !hasData;
 
-  const fetchEvents = async (page = 1) => {
-    setIsLoading(true);
-    try {
-      const res = await eventsApi.getEvents({
-        page,
-        limit: pagination.limit,
-        search: search || undefined,
-        service: service !== 'all' ? service : undefined,
-        status: status !== 'all' ? status : undefined,
-      });
-
-      setEvents(res.data.data || []);
-      setPagination(res.data.pagination);
-    } catch (err) {
-      console.error('Failed to fetch events:', err);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
+  // An out-of-range page (e.g. stale bookmark) jumps to the last real page.
+  const pageOutOfRange =
+    query.status === 'success' && pagination && pagination.total > 0 && items.length === 0 && pagination.page > pagination.totalPages;
+  const lastPage = pagination?.totalPages;
   useEffect(() => {
-    fetchEvents(1);
-  }, [service, status]);
+    if (pageOutOfRange) updateFilters({ page: lastPage });
+  }, [pageOutOfRange, lastPage, updateFilters]);
 
-  const handleSearchSubmit = (e) => {
-    e.preventDefault();
-    fetchEvents(1);
+  const resultsLabel = useMemo(() => {
+    const parts = [];
+    if (filters.q) parts.push(`matching “${filters.q}”`);
+    if (filters.service !== 'all') parts.push(EVENT_SERVICES[filters.service].label);
+    if (filters.status !== 'all') parts.push(`status ${EVENT_STATUSES[filters.status].label}`);
+    if (filters.range !== 'all') parts.push(EVENT_TIME_RANGES[filters.range].label.toLowerCase());
+    return parts.length ? `Events ${parts.join(', ')}` : 'All events';
+  }, [filters]);
+
+  const closeDetails = useCallback(() => setSelectedEvent(null), []);
+  const closeIngest = useCallback(() => setIsIngestOpen(false), []);
+
+  const handleIngest = async (payload) => {
+    await ingestEvent(payload); // errors are shown inside the form
+    setIsIngestOpen(false);
+    setNotice(`Event “${payload.eventType}” was ingested.`);
+    if (filters.page !== 1) updateFilters({ page: 1 });
+    else query.reload();
   };
 
-  const handleCreateSubmit = async (e) => {
-    e.preventDefault();
-    setIsSubmitting(true);
-    try {
-      let parsedMetadata = {};
-      try {
-        parsedMetadata = JSON.parse(newEvent.metadata);
-      } catch (e) {
-        alert('Invalid JSON in metadata field');
-        setIsSubmitting(false);
-        return;
-      }
-
-      await eventsApi.createEvent({
-        eventType: newEvent.eventType,
-        service: newEvent.service,
-        status: newEvent.status,
-        metadata: parsedMetadata,
-      });
-
-      setIsCreateOpen(false);
-      fetchEvents(1);
-    } catch (err) {
-      alert('Event creation failed: ' + (err.response?.data?.error?.message || err.message));
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
+  let results;
+  if (isInitialLoading) {
+    results = <TableSkeleton rows={Number(filters.limit)} />;
+  } else if (query.status === 'error') {
+    results = (
+      <StateMessage
+        tone="error"
+        announce
+        title="Couldn’t load events"
+        message={query.isNetworkError ? 'The API server is unreachable. Check that the backend is running, then retry.' : query.error}
+        onRetry={query.reload}
+      />
+    );
+  } else if (items.length === 0) {
+    results = (
+      <StateMessage
+        title={activeFilterCount ? 'No events match these filters' : 'No events yet'}
+        message={
+          activeFilterCount
+            ? 'Try a different search term, service, status or time range.'
+            : 'Events will appear here as services report them.'
+        }
+        action={
+          activeFilterCount ? (
+            <button type="button" className="btn btn-outline btn-sm" onClick={resetFilters}>
+              <FilterX size={14} aria-hidden="true" /> Clear filters
+            </button>
+          ) : null
+        }
+      />
+    );
+  } else {
+    results = isCompact ? (
+      <EventCardList events={items} now={now} onSelect={setSelectedEvent} label={resultsLabel} />
+    ) : (
+      <EventsTable events={items} now={now} onSelect={setSelectedEvent} caption={resultsLabel} />
+    );
+  }
 
   return (
-    <div>
-      {/* Header */}
+    <div className="list-page">
       <div className="page-header">
         <div>
           <h1 className="page-title">Events Stream</h1>
-          <p className="page-subtitle">
-            Centralized application log & pipeline audit trail across services
-          </p>
+          <p className="page-subtitle">Centralized application log &amp; pipeline audit trail across services</p>
         </div>
-
-        <div style={{ display: 'flex', gap: '10px' }}>
+        <div className="page-actions">
           <button
-            onClick={() => fetchEvents(pagination.page)}
+            type="button"
+            onClick={query.reload}
             className="btn btn-secondary btn-sm"
+            disabled={query.status === 'loading'}
+            aria-label={query.status === 'loading' ? 'Refreshing events' : 'Refresh events'}
           >
-            <RefreshCw size={14} className={isLoading ? 'loading-spinner' : ''} />
-            Refresh
+            <RefreshCw size={14} className={query.status === 'loading' ? 'spin' : undefined} aria-hidden="true" />
+            <span>Refresh</span>
           </button>
-          <button
-            onClick={() => setIsCreateOpen(true)}
-            className="btn btn-primary btn-sm"
-          >
-            <Plus size={14} /> Ingest Event
-          </button>
-        </div>
-      </div>
-
-      {/* Filter and Search Bar */}
-      <div className="card" style={{ marginBottom: '20px', padding: '16px 20px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '16px' }}>
-          {/* Search input */}
-          <form onSubmit={handleSearchSubmit} style={{ flex: 1, minWidth: '240px' }}>
-            <div style={{ position: 'relative' }}>
-              <input
-                type="text"
-                className="input"
-                style={{ width: '100%', paddingLeft: '36px' }}
-                placeholder="Search by event type or source..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-              />
-              <Search
-                size={16}
-                style={{
-                  position: 'absolute',
-                  left: '12px',
-                  top: '50%',
-                  transform: 'translateY(-50%)',
-                  color: 'var(--text-muted)',
-                }}
-              />
-            </div>
-          </form>
-
-          {/* Select Dropdowns */}
-          <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>Service:</span>
-              <select
-                className="select"
-                value={service}
-                onChange={(e) => setService(e.target.value)}
-              >
-                <option value="all">All Services</option>
-                <option value="auth-service">Auth Service</option>
-                <option value="notification-service">Notification Service</option>
-                <option value="payment-service">Payment Service</option>
-                <option value="api-gateway">API Gateway</option>
-                <option value="system">System Core</option>
-              </select>
-            </div>
-
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>Status:</span>
-              <select
-                className="select"
-                value={status}
-                onChange={(e) => setStatus(e.target.value)}
-              >
-                <option value="all">All Statuses</option>
-                <option value="success">Success</option>
-                <option value="warning">Warning</option>
-                <option value="error">Error</option>
-                <option value="info">Info</option>
-              </select>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Events Table */}
-      <div className="table-container">
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>Status</th>
-              <th>Event Type</th>
-              <th>Service</th>
-              <th>User</th>
-              <th>Source</th>
-              <th>Timestamp</th>
-              <th style={{ textAlign: 'right' }}>Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {isLoading ? (
-              <tr>
-                <td colSpan={7} style={{ textAlign: 'center', padding: '40px' }}>
-                  <div className="loading-spinner" />
-                </td>
-              </tr>
-            ) : events.length === 0 ? (
-              <tr>
-                <td colSpan={7} style={{ textAlign: 'center', padding: '40px', color: 'var(--text-secondary)' }}>
-                  No matching events found in stream.
-                </td>
-              </tr>
-            ) : (
-              events.map((event) => (
-                <tr key={event._id}>
-                  <td>
-                    <Badge type={event.status}>{event.status}</Badge>
-                  </td>
-                  <td style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
-                    {event.eventType}
-                  </td>
-                  <td>
-                    <span
-                      style={{
-                        padding: '3px 8px',
-                        backgroundColor: 'var(--bg-tertiary)',
-                        borderRadius: 'var(--radius-sm)',
-                        fontSize: '12px',
-                        border: '1px solid var(--border-color)',
-                      }}
-                    >
-                      {event.service}
-                    </span>
-                  </td>
-                  <td style={{ color: 'var(--text-secondary)' }}>
-                    {event.userId?.name || (event.userId?.email ? event.userId.email : 'System/Anonymous')}
-                  </td>
-                  <td style={{ color: 'var(--text-muted)', fontSize: '13px' }}>
-                    {event.source || 'web-app'}
-                  </td>
-                  <td style={{ color: 'var(--text-muted)', fontSize: '12px' }}>
-                    {new Date(event.timestamp).toLocaleString()}
-                  </td>
-                  <td style={{ textAlign: 'right' }}>
-                    <button
-                      onClick={() => setSelectedEvent(event)}
-                      className="btn btn-outline btn-sm"
-                      title="Inspect metadata"
-                    >
-                      <Eye size={13} /> View
-                    </button>
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Pagination Controls */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          marginTop: '16px',
-          padding: '4px 8px',
-          fontSize: '13px',
-          color: 'var(--text-secondary)',
-        }}
-      >
-        <div>
-          Showing page <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{pagination.page}</span> of{' '}
-          <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{pagination.totalPages}</span> ({pagination.total} total events)
-        </div>
-
-        <div style={{ display: 'flex', gap: '8px' }}>
-          <button
-            onClick={() => fetchEvents(pagination.page - 1)}
-            disabled={!pagination.hasPrevPage}
-            className="btn btn-secondary btn-sm"
-          >
-            <ChevronLeft size={16} /> Previous
-          </button>
-          <button
-            onClick={() => fetchEvents(pagination.page + 1)}
-            disabled={!pagination.hasNextPage}
-            className="btn btn-secondary btn-sm"
-          >
-            Next <ChevronRight size={16} />
+          <button type="button" onClick={() => setIsIngestOpen(true)} className="btn btn-primary btn-sm">
+            <Plus size={14} aria-hidden="true" /> Ingest event
           </button>
         </div>
       </div>
 
-      {/* Event Details Inspection Modal */}
-      <Modal
-        isOpen={!!selectedEvent}
-        onClose={() => setSelectedEvent(null)}
-        title="Event Inspection & Metadata"
-      >
-        {selectedEvent && (
-          <div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '16px' }}>
-              <div>
-                <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Event Type</div>
-                <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{selectedEvent.eventType}</div>
-              </div>
-              <div>
-                <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Status</div>
-                <Badge type={selectedEvent.status}>{selectedEvent.status}</Badge>
-              </div>
-              <div>
-                <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Service</div>
-                <div>{selectedEvent.service}</div>
-              </div>
-              <div>
-                <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Source</div>
-                <div>{selectedEvent.source}</div>
-              </div>
-              <div>
-                <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Timestamp</div>
-                <div style={{ fontSize: '13px' }}>{new Date(selectedEvent.timestamp).toISOString()}</div>
-              </div>
-              <div>
-                <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Event ID</div>
-                <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>{selectedEvent._id}</div>
-              </div>
-            </div>
+      {notice && (
+        <div className="dashboard-notice dashboard-notice--success" role="status">
+          <CheckCircle2 size={16} aria-hidden="true" />
+          <span>{notice}</span>
+          <button type="button" className="btn btn-outline btn-sm" onClick={() => setNotice('')}>
+            Dismiss
+          </button>
+        </div>
+      )}
 
-            <div style={{ marginBottom: '8px', fontSize: '13px', fontWeight: 600 }}>
-              JSON Payload Metadata:
-            </div>
-            <pre className="code-block">
-              {JSON.stringify(selectedEvent.metadata || {}, null, 2)}
-            </pre>
-          </div>
+      <section className="card filter-bar" aria-label="Event filters">
+        <SearchField
+          key={filters.q}
+          value={filters.q}
+          onSearch={(q) => updateFilters({ q })}
+          label="Search events by type or source"
+          placeholder="Search type or source…"
+        />
+        <div className="filter-fields">
+          <FilterSelect label="Service" value={filters.service} options={SERVICE_OPTIONS} onChange={(service) => updateFilters({ service })} />
+          <FilterSelect label="Status" value={filters.status} options={STATUS_OPTIONS} onChange={(status) => updateFilters({ status })} />
+          <FilterSelect label="Time" value={filters.range} options={RANGE_OPTIONS} onChange={(range) => updateFilters({ range })} />
+          {activeFilterCount > 0 && (
+            <button type="button" className="btn btn-outline btn-sm filter-reset" onClick={resetFilters}>
+              <FilterX size={14} aria-hidden="true" /> Clear filters ({activeFilterCount})
+            </button>
+          )}
+        </div>
+      </section>
+
+      <section className="results-section" aria-label="Event results" aria-busy={query.status === 'loading' || undefined}>
+        <div className={query.isRefreshing && query.status !== 'error' ? 'is-refreshing' : undefined}>{results}</div>
+
+        {hasData && query.status !== 'error' && items.length > 0 && (
+          <Pagination
+            pagination={pagination}
+            itemLabel="events"
+            onPageChange={(page) => updateFilters({ page })}
+            pageSizes={EVENT_PAGE_SIZES}
+            onPageSizeChange={(limit) => updateFilters({ limit: String(limit) })}
+            disabled={query.status === 'loading'}
+          />
         )}
+      </section>
+
+      <Modal isOpen={Boolean(selectedEvent)} onClose={closeDetails} title="Event details" maxWidth="640px">
+        {selectedEvent && <EventDetails event={selectedEvent} />}
       </Modal>
 
-      {/* Ingest Event Modal */}
-      <Modal
-        isOpen={isCreateOpen}
-        onClose={() => setIsCreateOpen(false)}
-        title="Ingest Custom Event"
-      >
-        <form onSubmit={handleCreateSubmit}>
-          <div className="input-group">
-            <label className="input-label">Event Type Identifier</label>
-            <input
-              type="text"
-              className="input"
-              value={newEvent.eventType}
-              onChange={(e) => setNewEvent({ ...newEvent, eventType: e.target.value })}
-              placeholder="e.g. invoice.generated"
-              required
-            />
-          </div>
-
-          <div className="input-group">
-            <label className="input-label">Service</label>
-            <select
-              className="select"
-              value={newEvent.service}
-              onChange={(e) => setNewEvent({ ...newEvent, service: e.target.value })}
-            >
-              <option value="payment-service">payment-service</option>
-              <option value="notification-service">notification-service</option>
-              <option value="auth-service">auth-service</option>
-              <option value="api-gateway">api-gateway</option>
-              <option value="system">system</option>
-            </select>
-          </div>
-
-          <div className="input-group">
-            <label className="input-label">Status</label>
-            <select
-              className="select"
-              value={newEvent.status}
-              onChange={(e) => setNewEvent({ ...newEvent, status: e.target.value })}
-            >
-              <option value="success">success</option>
-              <option value="info">info</option>
-              <option value="warning">warning</option>
-              <option value="error">error</option>
-            </select>
-          </div>
-
-          <div className="input-group">
-            <label className="input-label">JSON Metadata</label>
-            <textarea
-              className="input"
-              rows={4}
-              value={newEvent.metadata}
-              onChange={(e) => setNewEvent({ ...newEvent, metadata: e.target.value })}
-              style={{ fontFamily: 'monospace', fontSize: '12px' }}
-            />
-          </div>
-
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '20px' }}>
-            <button
-              type="button"
-              onClick={() => setIsCreateOpen(false)}
-              className="btn btn-secondary"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              className="btn btn-primary"
-              disabled={isSubmitting}
-            >
-              {isSubmitting ? 'Ingesting...' : 'Ingest Event'}
-            </button>
-          </div>
-        </form>
+      <Modal isOpen={isIngestOpen} onClose={closeIngest} title="Ingest event" maxWidth="560px">
+        <IngestEventForm onSubmit={handleIngest} onCancel={closeIngest} />
       </Modal>
     </div>
   );
