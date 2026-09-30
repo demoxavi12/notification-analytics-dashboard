@@ -1,51 +1,122 @@
-import React, { useState } from 'react';
-import { useNavigate, Link, useLocation } from 'react-router-dom';
-import { Activity, Lock, Mail, ArrowRight, ShieldCheck, User } from 'lucide-react';
-import { useAuth } from '../context/AuthContext';
+import { useRef, useState } from 'react';
+import { useNavigate, Link, useLocation, Navigate } from 'react-router-dom';
+import { Activity, Mail, ArrowRight, ShieldCheck, User } from 'lucide-react';
+import { useAuth } from '../context/useAuth';
+import PasswordInput from '../components/common/PasswordInput';
+import { normalizeEmail, validateEmail } from '../utils/authValidation';
+import { getSafeRedirectPath, SESSION_END_REASONS } from '../utils/authSession';
+
+const EMPTY_ERRORS = { email: '', password: '' };
+
+// Demo quick-fill is a development convenience. It is compiled out of production
+// builds unless VITE_ENABLE_DEMO_LOGIN=true (e.g. for a hosted demo environment).
+// These are the local seed accounts from backend/src/seed/seedData.js, not real credentials.
+const DEMO_LOGIN_ENABLED = import.meta.env.DEV || import.meta.env.VITE_ENABLE_DEMO_LOGIN === 'true';
+const DEMO_ACCOUNTS = DEMO_LOGIN_ENABLED
+  ? {
+      admin: { email: 'admin@saas.local', password: 'AdminPass123!' },
+      user: { email: 'user@saas.local', password: 'UserPass123!' },
+    }
+  : null;
+
+const bannerStyle = {
+  padding: '10px 14px',
+  borderRadius: 'var(--radius-sm)',
+  fontSize: '13px',
+  marginBottom: '16px',
+};
 
 const LoginPage = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [fieldErrors, setFieldErrors] = useState(EMPTY_ERRORS);
   const [errorMessage, setErrorMessage] = useState('');
 
-  const { login } = useAuth();
+  // Blocks a second submit synchronously (state-based `disabled` can lag a fast double Enter).
+  const submitLockRef = useRef(false);
+  const emailRef = useRef(null);
+  const passwordRef = useRef(null);
+
+  const { login, isAuthenticated, isLoading, signedOut } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
 
-  const from = location.state?.from?.pathname || '/dashboard';
-  const wasSessionExpired = new URLSearchParams(location.search).get('expired') === 'true';
+  const searchParams = new URLSearchParams(location.search);
+  // Return target: router state (from ProtectedRoute/AdminRoute) or ?from= (from the
+  // API client after a session ends). Both are validated to block open redirects.
+  const stateFrom = location.state?.from;
+  const from = getSafeRedirectPath(
+    stateFrom ? `${stateFrom.pathname}${stateFrom.search || ''}` : searchParams.get('from')
+  );
+
+  let sessionNotice = null;
+  if (searchParams.get('suspended') === 'true') {
+    sessionNotice = { tone: 'error', text: SESSION_END_REASONS.suspended };
+  } else if (searchParams.get('expired') === 'true') {
+    sessionNotice = { tone: 'warning', text: SESSION_END_REASONS.expired };
+  } else if (signedOut) {
+    sessionNotice = { tone: 'success', text: 'You have been signed out.' };
+  }
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!email || !password) {
-      setErrorMessage('Please provide both email and password');
+    if (submitLockRef.current) return;
+
+    const normalizedEmail = normalizeEmail(email);
+    // Login only checks presence/format; strength rules apply at registration.
+    const errors = {
+      email: validateEmail(normalizedEmail),
+      password: password ? '' : 'Password is required.',
+    };
+
+    if (errors.email || errors.password) {
+      setFieldErrors(errors);
+      setErrorMessage('');
+      (errors.email ? emailRef : passwordRef).current?.focus();
       return;
     }
 
+    setEmail(normalizedEmail);
+    submitLockRef.current = true;
     setIsSubmitting(true);
+    setFieldErrors(EMPTY_ERRORS);
     setErrorMessage('');
 
-    const res = await login(email, password);
-    setIsSubmitting(false);
-
-    if (res.success) {
-      navigate(from, { replace: true });
-    } else {
-      setErrorMessage(res.error);
+    try {
+      const res = await login(normalizedEmail, password);
+      if (res.success) {
+        navigate(from, { replace: true });
+        return;
+      }
+      setErrorMessage(res.error || 'Login failed. Please try again.');
+      // Keep the email, clear the password so a retry starts clean.
+      if (res.status === 401) {
+        setPassword('');
+        passwordRef.current?.focus();
+      }
+    } catch {
+      setErrorMessage('Unable to sign in right now. Please try again.');
+    } finally {
+      submitLockRef.current = false;
+      setIsSubmitting(false);
     }
   };
 
   const handleQuickFill = (role) => {
-    if (role === 'admin') {
-      setEmail('admin@saas.local');
-      setPassword('AdminPass123!');
-    } else {
-      setEmail('user@saas.local');
-      setPassword('UserPass123!');
-    }
+    const account = DEMO_ACCOUNTS?.[role];
+    if (!account) return;
+    setEmail(account.email);
+    setPassword(account.password);
+    setFieldErrors(EMPTY_ERRORS);
     setErrorMessage('');
   };
+
+  // Already signed in (e.g. visiting /login directly): go straight to the app.
+  // While submitting, handleSubmit performs the navigation itself.
+  if (!isLoading && isAuthenticated && !isSubmitting) {
+    return <Navigate to={from} replace />;
+  }
 
   return (
     <div
@@ -94,23 +165,22 @@ const LoginPage = () => {
           </p>
         </div>
 
-        {wasSessionExpired && (
+        {sessionNotice && (
           <div
+            role="status"
             style={{
-              padding: '10px 14px',
-              borderRadius: 'var(--radius-sm)',
-              backgroundColor: 'var(--warning-bg)',
-              color: 'var(--warning)',
-              fontSize: '13px',
-              marginBottom: '16px',
+              ...bannerStyle,
+              backgroundColor: `var(--${sessionNotice.tone}-bg)`,
+              color: `var(--${sessionNotice.tone})`,
             }}
           >
-            Your session expired. Please log in again.
+            {sessionNotice.text}
           </div>
         )}
 
         {errorMessage && (
           <div
+            role="alert"
             style={{
               padding: '10px 14px',
               borderRadius: 'var(--radius-sm)',
@@ -124,22 +194,36 @@ const LoginPage = () => {
           </div>
         )}
 
-        <form onSubmit={handleSubmit}>
+        <form onSubmit={handleSubmit} noValidate aria-busy={isSubmitting}>
           <div className="input-group">
-            <label className="input-label">Email Address</label>
+            <label className="input-label" htmlFor="login-email">
+              Email Address
+            </label>
             <div style={{ position: 'relative' }}>
               <input
+                id="login-email"
+                ref={emailRef}
                 type="email"
-                className="input"
+                inputMode="email"
+                className={`input${fieldErrors.email ? ' input-invalid' : ''}`}
                 style={{ width: '100%', paddingLeft: '36px' }}
                 placeholder="you@company.com"
                 value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                onChange={(e) => {
+                  setEmail(e.target.value);
+                  if (fieldErrors.email) setFieldErrors((prev) => ({ ...prev, email: '' }));
+                  setErrorMessage('');
+                }}
                 autoComplete="email"
+                autoCapitalize="none"
+                spellCheck={false}
+                aria-invalid={Boolean(fieldErrors.email) || undefined}
+                aria-describedby={fieldErrors.email ? 'login-email-error' : undefined}
                 required
               />
               <Mail
                 size={16}
+                aria-hidden="true"
                 style={{
                   position: 'absolute',
                   left: '12px',
@@ -149,32 +233,37 @@ const LoginPage = () => {
                 }}
               />
             </div>
+            {fieldErrors.email && (
+              <span id="login-email-error" className="field-error">
+                {fieldErrors.email}
+              </span>
+            )}
           </div>
 
           <div className="input-group" style={{ marginBottom: '24px' }}>
-            <label className="input-label">Password</label>
-            <div style={{ position: 'relative' }}>
-              <input
-                type="password"
-                className="input"
-                style={{ width: '100%', paddingLeft: '36px' }}
-                placeholder="••••••••••••"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                autoComplete="current-password"
-                required
-              />
-              <Lock
-                size={16}
-                style={{
-                  position: 'absolute',
-                  left: '12px',
-                  top: '50%',
-                  transform: 'translateY(-50%)',
-                  color: 'var(--text-muted)',
-                }}
-              />
-            </div>
+            <label className="input-label" htmlFor="login-password">
+              Password
+            </label>
+            <PasswordInput
+              id="login-password"
+              inputRef={passwordRef}
+              placeholder="••••••••••••"
+              value={password}
+              onChange={(e) => {
+                setPassword(e.target.value);
+                if (fieldErrors.password) setFieldErrors((prev) => ({ ...prev, password: '' }));
+                setErrorMessage('');
+              }}
+              autoComplete="current-password"
+              invalid={Boolean(fieldErrors.password)}
+              aria-describedby={fieldErrors.password ? 'login-password-error' : undefined}
+              required
+            />
+            {fieldErrors.password && (
+              <span id="login-password-error" className="field-error">
+                {fieldErrors.password}
+              </span>
+            )}
           </div>
 
           <button
@@ -193,36 +282,40 @@ const LoginPage = () => {
           </button>
         </form>
 
-        {/* Demo Quick Fill Helper Buttons */}
-        <div
-          style={{
-            marginTop: '24px',
-            paddingTop: '20px',
-            borderTop: '1px solid var(--border-color)',
-          }}
-        >
-          <div style={{ fontSize: '12px', color: 'var(--text-muted)', textAlign: 'center', marginBottom: '10px' }}>
-            Quick Demo Logins (1-Click)
+        {/* Demo Quick Fill Helper Buttons (development / explicitly enabled demo only) */}
+        {DEMO_ACCOUNTS && (
+          <div
+            style={{
+              marginTop: '24px',
+              paddingTop: '20px',
+              borderTop: '1px solid var(--border-color)',
+            }}
+          >
+            <div style={{ fontSize: '12px', color: 'var(--text-muted)', textAlign: 'center', marginBottom: '10px' }}>
+              Quick Demo Logins (1-Click)
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => handleQuickFill('admin')}
+                title={DEMO_ACCOUNTS.admin.email}
+                disabled={isSubmitting}
+              >
+                <ShieldCheck size={14} color="var(--primary)" /> Admin Demo
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => handleQuickFill('user')}
+                title={DEMO_ACCOUNTS.user.email}
+                disabled={isSubmitting}
+              >
+                <User size={14} color="var(--success)" /> User Demo
+              </button>
+            </div>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
-              onClick={() => handleQuickFill('admin')}
-              title="admin@saas.local"
-            >
-              <ShieldCheck size={14} color="var(--primary)" /> Admin Demo
-            </button>
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
-              onClick={() => handleQuickFill('user')}
-              title="user@saas.local"
-            >
-              <User size={14} color="var(--success)" /> User Demo
-            </button>
-          </div>
-        </div>
+        )}
 
         {/* Footer link */}
         <div style={{ textAlign: 'center', marginTop: '20px', fontSize: '13px', color: 'var(--text-secondary)' }}>

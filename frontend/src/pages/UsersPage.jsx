@@ -11,7 +11,7 @@ import {
   CheckCircle,
 } from 'lucide-react';
 import { usersApi } from '../services/api';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context/useAuth';
 import Badge from '../components/common/Badge';
 
 const UsersPage = () => {

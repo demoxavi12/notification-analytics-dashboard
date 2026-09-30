@@ -1,4 +1,4 @@
-import React from 'react';
+import { memo } from 'react';
 import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard,
@@ -6,166 +6,148 @@ import {
   Activity,
   Bell,
   Users,
-  ShieldAlert,
   Server,
   Database,
+  PanelLeftClose,
+  PanelLeftOpen,
+  X,
 } from 'lucide-react';
-import { useAuth } from '../../context/AuthContext';
+import { useAuth } from '../../context/useAuth';
 
-const Sidebar = ({ isOpen, onClose, systemHealth }) => {
+// adminOnly items are hidden from non-admins purely for UX. Real authorization is
+// enforced by the backend (authorize('admin')) and the AdminRoute guard.
+const NAV_ITEMS = [
+  { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { to: '/analytics', label: 'Analytics', icon: BarChart3 },
+  { to: '/events', label: 'Events Feed', icon: Activity },
+  { to: '/notifications', label: 'Notifications', icon: Bell },
+  { to: '/users', label: 'Users Management', icon: Users, adminOnly: true },
+];
+
+// Map raw health strings to a dot style + human label (never color alone).
+const describeService = (service, value) => {
+  if (value === 'connected') return { tone: 'ok', text: 'Connected' };
+  if (value === 'checking' || !value) return { tone: 'unknown', text: 'Checking…' };
+  if (value === 'unreachable') return { tone: 'down', text: 'Status unavailable' };
+  // Redis has an in-memory fallback, so losing it degrades rather than breaks the app.
+  if (service === 'redis') return { tone: 'warn', text: 'Fallback mode' };
+  return { tone: 'down', text: 'Disconnected' };
+};
+
+const TONE_CLASS = { ok: 'status-dot--ok', warn: 'status-dot--warn', down: 'status-dot--down', unknown: '' };
+
+const StatusRow = ({ icon: Icon, name, service, value }) => {
+  const { tone, text } = describeService(service, value);
+  return (
+    <li className="sidebar-status-item" title={`${name}: ${text}`}>
+      <span className="sidebar-status-name">
+        <Icon size={13} aria-hidden="true" />
+        <span className="sidebar-status-text">{name}</span>
+        <span className="sr-only">: {text}</span>
+      </span>
+      <span className={`status-dot ${TONE_CLASS[tone]}`} aria-hidden="true" />
+    </li>
+  );
+};
+
+const Sidebar = ({
+  id,
+  isDrawer,
+  isOpen,
+  isCollapsed,
+  onClose,
+  onToggleCollapse,
+  systemHealth,
+  closeButtonRef,
+}) => {
   const { isAdmin } = useAuth();
+  const navItems = NAV_ITEMS.filter((item) => !item.adminOnly || isAdmin);
+  const collapsed = !isDrawer && isCollapsed;
 
-  const navItems = [
-    { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { to: '/analytics', label: 'Analytics', icon: BarChart3 },
-    { to: '/events', label: 'Events Feed', icon: Activity },
-    { to: '/notifications', label: 'Notifications', icon: Bell },
-  ];
+  const className = [
+    'sidebar',
+    collapsed && 'sidebar--collapsed',
+    isDrawer && isOpen && 'sidebar--open',
+  ]
+    .filter(Boolean)
+    .join(' ');
 
-  if (isAdmin) {
-    navItems.push({ to: '/users', label: 'Users Management', icon: Users });
-  }
+  // As an open drawer it behaves like a modal dialog; otherwise it's a plain landmark.
+  const drawerProps =
+    isDrawer && isOpen ? { role: 'dialog', 'aria-modal': true, 'aria-label': 'Navigation menu' } : {};
 
   return (
-    <aside
-      style={{
-        width: '260px',
-        backgroundColor: 'var(--bg-secondary)',
-        borderRight: '1px solid var(--border-color)',
-        display: 'flex',
-        flexDirection: 'column',
-        justifyContent: 'space-between',
-        flexShrink: 0,
-        height: '100vh',
-        position: 'sticky',
-        top: 0,
-        zIndex: 40,
-      }}
-    >
+    <aside id={id} className={className} {...drawerProps}>
       {/* Brand Header */}
-      <div>
-        <div
-          style={{
-            padding: '24px 20px',
-            borderBottom: '1px solid var(--border-color)',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '12px',
-          }}
-        >
-          <div
-            style={{
-              width: '36px',
-              height: '36px',
-              borderRadius: 'var(--radius-sm)',
-              backgroundColor: 'var(--primary)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: '#fff',
-              fontWeight: 'bold',
-            }}
-          >
-            <Activity size={22} />
-          </div>
-          <div>
-            <div style={{ fontWeight: 700, fontSize: '15px', color: 'var(--text-primary)', letterSpacing: '-0.02em' }}>
-              PulseOps SaaS
-            </div>
-            <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-              Events & Notifications
-            </div>
-          </div>
+      <div className="sidebar-brand">
+        <div className="sidebar-brand-mark" aria-hidden="true">
+          <Activity size={22} />
+        </div>
+        <div className="sidebar-brand-text">
+          <div className="sidebar-brand-name">PulseOps SaaS</div>
+          <div className="sidebar-brand-tagline">Events &amp; Notifications</div>
         </div>
 
-        {/* Navigation Links */}
-        <nav style={{ padding: '16px 12px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
-          <div
-            style={{
-              fontSize: '11px',
-              textTransform: 'uppercase',
-              letterSpacing: '0.05em',
-              color: 'var(--text-muted)',
-              padding: '8px 12px 4px',
-              fontWeight: 600,
-            }}
-          >
-            Main Menu
-          </div>
+        <button
+          type="button"
+          className="icon-btn sidebar-collapse-btn"
+          onClick={onToggleCollapse}
+          aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          aria-expanded={!collapsed}
+          aria-controls={id}
+          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        >
+          {collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+        </button>
 
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            return (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                onClick={onClose}
-                style={({ isActive }) => ({
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '12px',
-                  padding: '10px 14px',
-                  borderRadius: 'var(--radius-sm)',
-                  fontSize: '14px',
-                  fontWeight: 500,
-                  color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)',
-                  backgroundColor: isActive ? 'var(--bg-tertiary)' : 'transparent',
-                  borderLeft: isActive ? '3px solid var(--primary)' : '3px solid transparent',
-                  transition: 'all 0.15s ease',
-                })}
-              >
-                <Icon size={18} color="currentColor" />
-                <span>{item.label}</span>
-              </NavLink>
-            );
-          })}
-        </nav>
+        <button
+          type="button"
+          ref={closeButtonRef}
+          className="icon-btn sidebar-close-btn"
+          onClick={onClose}
+          aria-label="Close navigation menu"
+        >
+          <X size={18} />
+        </button>
       </div>
+
+      {/* Navigation Links */}
+      <nav className="sidebar-nav" aria-label="Main navigation">
+        <div className="sidebar-section-label" aria-hidden="true">
+          Main Menu
+        </div>
+
+        {navItems.map(({ to, label, icon: Icon }) => (
+          <NavLink
+            key={to}
+            to={to}
+            className="sidebar-link"
+            title={collapsed ? label : undefined}
+            onClick={isDrawer ? onClose : undefined}
+          >
+            <Icon size={18} aria-hidden="true" />
+            <span className="sidebar-link-label">{label}</span>
+          </NavLink>
+        ))}
+      </nav>
 
       {/* System Status footer widget */}
-      <div
-        style={{
-          padding: '16px 20px',
-          borderTop: '1px solid var(--border-color)',
-          backgroundColor: 'rgba(0,0,0,0.15)',
-        }}
-      >
-        <div style={{ fontSize: '11px', textTransform: 'uppercase', color: 'var(--text-muted)', fontWeight: 600, marginBottom: '8px' }}>
+      <section className="sidebar-status" aria-label="Infrastructure status">
+        <div
+          className="sidebar-status-title sidebar-section-label"
+          style={{ padding: 0, marginBottom: '8px' }}
+          aria-hidden="true"
+        >
           Infrastructure
         </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '12px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <span style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-secondary)' }}>
-              <Database size={13} /> MongoDB
-            </span>
-            <span
-              style={{
-                width: '8px',
-                height: '8px',
-                borderRadius: '50%',
-                backgroundColor: systemHealth?.database === 'connected' ? 'var(--success)' : 'var(--warning)',
-              }}
-              title={systemHealth?.database || 'checking'}
-            />
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <span style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-secondary)' }}>
-              <Server size={13} /> Redis Cache
-            </span>
-            <span
-              style={{
-                width: '8px',
-                height: '8px',
-                borderRadius: '50%',
-                backgroundColor: systemHealth?.redis === 'connected' ? 'var(--success)' : 'var(--warning)',
-              }}
-              title={systemHealth?.redis || 'fallback'}
-            />
-          </div>
-        </div>
-      </div>
+        <ul className="sidebar-status-list">
+          <StatusRow icon={Database} name="MongoDB" service="database" value={systemHealth?.database} />
+          <StatusRow icon={Server} name="Redis Cache" service="redis" value={systemHealth?.redis} />
+        </ul>
+      </section>
     </aside>
   );
 };
 
-export default Sidebar;
+// Re-renders only when its props (or auth) actually change, not on every layout render.
+export default memo(Sidebar);
