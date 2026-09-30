@@ -1,495 +1,417 @@
-import React, { useState, useEffect } from 'react';
-import { useNavigate, useOutletContext } from 'react-router-dom';
+import { useMemo } from 'react';
+import { Link, useOutletContext } from 'react-router-dom';
 import {
   Activity,
-  Bell,
-  Users,
   AlertTriangle,
-  Send,
-  Zap,
+  Bell,
   CheckCircle2,
+  Database,
+  Globe,
   RefreshCw,
-  PlusCircle,
+  Users,
+  WifiOff,
+  Zap,
 } from 'lucide-react';
-import {
-  AreaChart,
-  Area,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  PieChart,
-  Pie,
-  Cell,
-  Legend,
-} from 'recharts';
-import { analyticsApi, eventsApi, notificationsApi } from '../services/api';
+import { useAuth } from '../context/useAuth';
+import useDashboardData from '../features/dashboard/useDashboardData';
+import { DASHBOARD_RANGES } from '../features/dashboard/dashboardModel';
 import KPICard from '../components/common/KPICard';
-import Badge from '../components/common/Badge';
+import DashboardSection from '../components/dashboard/DashboardSection';
+import ActivityChart from '../components/dashboard/ActivityChart';
+import BreakdownList from '../components/dashboard/BreakdownList';
+import ServiceHealthPanel from '../components/dashboard/ServiceHealthPanel';
+import RangeSelector from '../components/dashboard/RangeSelector';
+import { RecentEventsList, RecentNotificationsList } from '../components/dashboard/RecentActivity';
+import { formatCount, formatPercent, formatRelativeTime, formatDateTime, humanizeIdentifier } from '../utils/formatters';
+import {
+  DELIVERY_STATUSES,
+  EVENT_SERVICES,
+  NOTIFICATION_CHANNELS,
+  colorFor,
+  labelFor,
+} from '../utils/domainLabels';
 
-const SERVICE_COLORS = {
-  'auth-service': '#3b82f6',
-  'notification-service': '#10b981',
-  'payment-service': '#8b5cf6',
-  'api-gateway': '#06b6d4',
-  system: '#ef4444',
-};
+
+const SIMULATIONS = [
+  { type: 'payment', label: 'Payment event' },
+  { type: 'notification', label: 'Notification alert' },
+  { type: 'auth', label: 'API request' },
+  { type: 'system', label: 'System error', danger: true },
+];
+
+// Skeletons sized like the content they replace, to avoid layout shift.
+const ChartSkeleton = () => <div className="skeleton skeleton-chart" />;
+const ListSkeleton = ({ rows = 4 }) => (
+  <div className="skeleton-list">
+    {Array.from({ length: rows }, (_, i) => (
+      <div key={i} className="skeleton skeleton-row" />
+    ))}
+  </div>
+);
 
 const DashboardPage = () => {
-  const [overview, setOverview] = useState(null);
-  const [timeseries, setTimeseries] = useState([]);
-  const [distributions, setDistributions] = useState(null);
-  const [recentEvents, setRecentEvents] = useState([]);
-  const [recentNotifications, setRecentNotifications] = useState([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [isSimulating, setIsSimulating] = useState(false);
-  const [error, setError] = useState(null);
+  const { isAdmin } = useAuth();
+  const { refreshUnreadCount, systemHealth } = useOutletContext() || {};
+  const dashboard = useDashboardData({ isAdmin, onUnreadCountChange: refreshUnreadCount });
+  const { sections, range, loadedRange } = dashboard;
 
-  const navigate = useNavigate();
-  const { refreshUnreadCount } = useOutletContext() || {};
+  const rangeInfo = DASHBOARD_RANGES[loadedRange];
+  const overview = sections.overview.data;
+  const overviewLoading = !overview && sections.overview.status === 'loading';
 
-  const fetchDashboardData = async () => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const [ovRes, tsRes, distRes, evRes, notifRes] = await Promise.all([
-        analyticsApi.getOverview({ range: '7d' }),
-        analyticsApi.getTimeSeries({ range: '7d' }),
-        analyticsApi.getDistributions({ range: '7d' }),
-        eventsApi.getEvents({ limit: 6 }),
-        notificationsApi.getNotifications({ limit: 5 }),
-      ]);
-
-      setOverview(ovRes.data.data.kpis);
-      setTimeseries(tsRes.data.data.timeline || []);
-      setDistributions(distRes.data.data);
-      setRecentEvents(evRes.data.data || []);
-      setRecentNotifications(notifRes.data.data || []);
-    } catch (err) {
-      console.error('Failed to load dashboard:', err);
-      setError(err.response?.data?.error?.message || 'Could not load dashboard metrics');
-    } finally {
-      setIsLoading(false);
+  // KPI definitions derived from the normalized overview; recomputed only when it changes.
+  const kpis = useMemo(() => {
+    if (!overview) return [];
+    const periodLabel = rangeInfo.description.toLowerCase();
+    const list = [
+      {
+        id: 'events',
+        label: 'Total events',
+        value: formatCount(overview.totalEvents),
+        subtext: overview.totalEvents > 0 ? `Ingested in the ${periodLabel}` : `No events in the ${periodLabel}`,
+        icon: Activity,
+        color: '#3b82f6',
+      },
+      {
+        id: 'errors',
+        label: 'Failed events',
+        value: formatCount(overview.errorCount),
+        subtext:
+          overview.errorRate === null ? 'No events to evaluate' : `${formatPercent(overview.errorRate)} of all events`,
+        subtextTone: overview.errorCount > 0 ? 'error' : undefined,
+        icon: AlertTriangle,
+        color: '#ef4444',
+      },
+      {
+        id: 'notifications',
+        label: 'Notifications sent',
+        value: formatCount(overview.totalNotifications),
+        subtext:
+          overview.totalNotifications > 0
+            ? `${formatCount(overview.delivered)} delivered · ${formatCount(overview.pending)} pending`
+            : `None sent in the ${periodLabel}`,
+        icon: Bell,
+        color: '#8b5cf6',
+      },
+      {
+        id: 'delivery',
+        label: 'Delivery success',
+        value: overview.deliveryRate === null ? '—' : formatPercent(overview.deliveryRate),
+        subtext:
+          overview.deliveryRate === null
+            ? 'No deliveries to measure'
+            : `${formatCount(overview.failed)} failed deliver${overview.failed === 1 ? 'y' : 'ies'}`,
+        subtextTone: overview.failed > 0 ? 'warning' : undefined,
+        icon: CheckCircle2,
+        color: '#06b6d4',
+      },
+      {
+        id: 'api',
+        label: 'API requests',
+        value: formatCount(overview.apiRequests),
+        subtext: 'Recorded by the API gateway',
+        icon: Globe,
+        color: '#10b981',
+      },
+    ];
+    if (overview.totalUsers !== null) {
+      list.push({
+        id: 'users',
+        label: 'Registered users',
+        value: formatCount(overview.totalUsers),
+        subtext: 'All accounts (admin view)',
+        icon: Users,
+        color: '#f59e0b',
+      });
     }
-  };
+    return list;
+  }, [overview, rangeInfo]);
 
-  useEffect(() => {
-    fetchDashboardData();
-  }, []);
+  const timeline = sections.timeline.data;
+  const timelineIsEmpty = useMemo(
+    () => !!timeline && timeline.every((p) => p.events === 0 && p.notifications === 0 && p.errors === 0),
+    [timeline]
+  );
 
-  const handleSimulate = async (serviceType) => {
-    setIsSimulating(true);
-    try {
-      await eventsApi.simulateEvent(serviceType);
-      // Refresh metrics and feeds
-      await fetchDashboardData();
-      if (refreshUnreadCount) refreshUnreadCount();
-    } catch (err) {
-      alert('Event simulation failed: ' + (err.response?.data?.error?.message || err.message));
-    } finally {
-      setIsSimulating(false);
-    }
-  };
-
-  const handleMarkNotificationRead = async (id) => {
-    try {
-      await notificationsApi.markAsRead(id);
-      setRecentNotifications((prev) =>
-        prev.map((n) => (n._id === id ? { ...n, read: true } : n))
-      );
-      if (refreshUnreadCount) refreshUnreadCount();
-    } catch (err) {
-      console.error('Failed to mark read:', err);
-    }
-  };
-
-  if (isLoading && !overview) {
-    return (
-      <div style={{ textAlign: 'center', padding: '100px 0' }}>
-        <div className="loading-spinner" />
-        <p style={{ color: 'var(--text-secondary)', marginTop: '12px' }}>Loading SaaS analytics...</p>
-      </div>
-    );
-  }
+  const distributions = sections.distributions.data;
+  const scopeNote = isAdmin ? 'Across all users' : 'Your events and notifications';
 
   return (
-    <div>
-      {/* Top Header */}
+    <div className="dashboard">
+      {/* Header */}
       <div className="page-header">
         <div>
           <h1 className="page-title">Executive Dashboard</h1>
-          <p className="page-subtitle">
-            Cross-service monitoring, event streaming, and delivery metrics
-          </p>
+          <p className="page-subtitle">Operational overview of events, notification delivery and service health</p>
         </div>
 
-        <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+        <div className="dashboard-controls">
+          <RangeSelector value={range} options={DASHBOARD_RANGES} onChange={dashboard.setRange} />
           <button
-            onClick={fetchDashboardData}
+            type="button"
+            onClick={dashboard.refresh}
             className="btn btn-secondary btn-sm"
-            disabled={isLoading}
+            disabled={dashboard.isRefreshing}
+            aria-label={dashboard.isRefreshing ? 'Refreshing dashboard' : 'Refresh dashboard'}
           >
-            <RefreshCw size={14} className={isLoading ? 'loading-spinner' : ''} />
-            Refresh
+            <RefreshCw size={14} className={dashboard.isRefreshing ? 'spin' : undefined} aria-hidden="true" />
+            <span>Refresh</span>
           </button>
         </div>
       </div>
 
-      {/* Simulator Action Banner */}
-      <div
-        className="card"
-        style={{
-          marginBottom: '24px',
-          background: 'linear-gradient(90deg, rgba(31,41,55,0.8) 0%, rgba(17,24,39,0.9) 100%)',
-          borderColor: 'var(--border-light)',
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '16px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-            <div
-              style={{
-                width: '36px',
-                height: '36px',
-                borderRadius: '8px',
-                backgroundColor: 'rgba(59, 130, 246, 0.15)',
-                color: 'var(--primary)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}
-            >
-              <Zap size={20} />
-            </div>
-            <div>
-              <div style={{ fontWeight: 600, fontSize: '14px', color: 'var(--text-primary)' }}>
-                Live Service Ingestion Simulator
-              </div>
-              <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                Emit real-time events across microservices to observe live cache invalidation and aggregation.
-              </div>
-            </div>
-          </div>
+      <p className="dashboard-updated" aria-live="polite">
+        {dashboard.isRefreshing
+          ? 'Updating…'
+          : dashboard.lastUpdated
+            ? (
+              <>
+                Updated <time dateTime={new Date(dashboard.lastUpdated).toISOString()} title={formatDateTime(dashboard.lastUpdated)}>{formatRelativeTime(dashboard.lastUpdated)}</time>
+                {' · '}
+                {rangeInfo.description} · {scopeNote}
+              </>
+            )
+            : null}
+      </p>
 
-          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-            <button
-              onClick={() => handleSimulate('payment')}
-              className="btn btn-secondary btn-sm"
-              disabled={isSimulating}
-            >
-              + Payment Event
-            </button>
-            <button
-              onClick={() => handleSimulate('notification')}
-              className="btn btn-secondary btn-sm"
-              disabled={isSimulating}
-            >
-              + Notification Alert
-            </button>
-            <button
-              onClick={() => handleSimulate('auth')}
-              className="btn btn-secondary btn-sm"
-              disabled={isSimulating}
-            >
-              + API Request
-            </button>
-            <button
-              onClick={() => handleSimulate('system')}
-              className="btn btn-secondary btn-sm"
-              style={{ color: 'var(--error)' }}
-              disabled={isSimulating}
-            >
-              + System Error
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {error && (
-        <div
-          style={{
-            padding: '14px',
-            backgroundColor: 'var(--error-bg)',
-            color: 'var(--error)',
-            borderRadius: 'var(--radius-sm)',
-            marginBottom: '20px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-          }}
-        >
-          <AlertTriangle size={16} />
-          <span>{error}</span>
-          <button onClick={fetchDashboardData} className="btn btn-sm btn-outline" style={{ marginLeft: 'auto' }}>
-            Retry
+      {/* Data-source notices */}
+      {dashboard.mode === 'demo' && (
+        <div className="dashboard-notice dashboard-notice--info" role="status">
+          <Database size={16} aria-hidden="true" />
+          <span>
+            <strong>Demo data.</strong> The backend is unavailable, so this dashboard is showing generated data based
+            on the project’s seed dataset (development only). Actions are not saved.
+          </span>
+          <button type="button" className="btn btn-outline btn-sm" onClick={dashboard.disableDemoMode}>
+            Try live data
           </button>
         </div>
       )}
+      {dashboard.canUseDemoMode && (
+        <div className="dashboard-notice dashboard-notice--warning" role="status">
+          <WifiOff size={16} aria-hidden="true" />
+          <span>
+            <strong>Backend unreachable.</strong> Live metrics can’t be loaded. Start the API and retry, or preview
+            the dashboard with demo data.
+          </span>
+          <button type="button" className="btn btn-outline btn-sm" onClick={dashboard.enableDemoMode}>
+            Use demo data
+          </button>
+        </div>
+      )}
+      {dashboard.actionError && (
+        <div className="dashboard-notice dashboard-notice--error" role="alert">
+          <AlertTriangle size={16} aria-hidden="true" />
+          <span>{dashboard.actionError}</span>
+        </div>
+      )}
 
-      {/* KPI Summary Cards */}
-      <div className="kpi-grid">
-        <KPICard
-          label="Total Events"
-          value={overview?.totalEvents?.toLocaleString()}
-          subtext="Past 7 days"
-          icon={Activity}
-          trend={14.2}
-          color="#3b82f6"
-        />
-        <KPICard
-          label="Active Users"
-          value={overview?.totalUsers?.toLocaleString()}
-          subtext="Registered accounts"
-          icon={Users}
-          color="#10b981"
-        />
-        <KPICard
-          label="Notifications Sent"
-          value={overview?.totalNotifications?.toLocaleString()}
-          subtext={`${overview?.successfulNotifications || 0} delivered`}
-          icon={Bell}
-          trend={8.5}
-          color="#8b5cf6"
-        />
-        <KPICard
-          label="Delivery Success"
-          value={overview?.deliveryRate !== undefined ? `${overview.deliveryRate}%` : '100%'}
-          subtext={`${overview?.failedNotifications || 0} failed alerts`}
-          icon={CheckCircle2}
-          color="#06b6d4"
-        />
-        <KPICard
-          label="System Errors"
-          value={overview?.errorCount?.toLocaleString()}
-          subtext="Requires inspection"
-          icon={AlertTriangle}
-          color="#ef4444"
-        />
-      </div>
-
-      {/* Charts Grid */}
-      <div className="charts-grid">
-        {/* Timeline Chart */}
-        <div className="card">
-          <div className="card-header">
-            <div>
-              <div className="card-title">Activity Volume Over Time</div>
-              <div className="card-subtitle">Aggregated events & errors over the last 7 days</div>
-            </div>
-            <button onClick={() => navigate('/analytics')} className="btn btn-outline btn-sm">
-              Deep Dive
+      {/* KPI summary */}
+      <section aria-labelledby="dashboard-kpi-heading" className="dashboard-kpis">
+        <h2 id="dashboard-kpi-heading" className="sr-only">
+          Key metrics
+        </h2>
+        {sections.overview.status === 'error' && !overview ? (
+          <div className="card section-state section-state--error">
+            <AlertTriangle size={20} aria-hidden="true" />
+            <p className="section-state-title">Couldn’t load summary metrics</p>
+            <p className="section-state-message">{sections.overview.error}</p>
+            <button type="button" className="btn btn-outline btn-sm" onClick={dashboard.refresh}>
+              <RefreshCw size={14} aria-hidden="true" /> Retry
             </button>
           </div>
-
-          <div style={{ height: '280px', width: '100%' }}>
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={timeseries}>
-                <defs>
-                  <linearGradient id="colorEvents" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.4} />
-                    <stop offset="95%" stopColor="#3b82f6" stopOpacity={0.0} />
-                  </linearGradient>
-                  <linearGradient id="colorErrors" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#ef4444" stopOpacity={0.4} />
-                    <stop offset="95%" stopColor="#ef4444" stopOpacity={0.0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" vertical={false} />
-                <XAxis dataKey="date" stroke="#6b7280" fontSize={11} tickLine={false} />
-                <YAxis stroke="#6b7280" fontSize={11} tickLine={false} axisLine={false} />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: '#111827',
-                    borderColor: '#374151',
-                    borderRadius: '8px',
-                    fontSize: '12px',
-                    color: '#f9fafb',
-                  }}
-                />
-                <Area
-                  type="monotone"
-                  dataKey="events"
-                  name="Events"
-                  stroke="#3b82f6"
-                  strokeWidth={2}
-                  fillOpacity={1}
-                  fill="url(#colorEvents)"
-                />
-                <Area
-                  type="monotone"
-                  dataKey="errors"
-                  name="Errors"
-                  stroke="#ef4444"
-                  strokeWidth={2}
-                  fillOpacity={1}
-                  fill="url(#colorErrors)"
-                />
-              </AreaChart>
-            </ResponsiveContainer>
+        ) : (
+          <div className={`kpi-grid${sections.overview.status === 'loading' && overview ? ' is-refreshing' : ''}`}>
+            {overviewLoading
+              ? Array.from({ length: isAdmin ? 6 : 5 }, (_, i) => <KPICard key={i} label="Loading metric" isLoading />)
+              : kpis.map(({ id, ...kpi }) => <KPICard key={id} {...kpi} />)}
           </div>
-        </div>
+        )}
+      </section>
 
-        {/* Service Breakdown Donut */}
-        <div className="card">
-          <div className="card-header">
-            <div>
-              <div className="card-title">Events by Service</div>
-              <div className="card-subtitle">Cluster source breakdown</div>
-            </div>
-          </div>
+      {/* Activity + health */}
+      <div className="dashboard-grid dashboard-grid--main">
+        <DashboardSection
+          title="Activity over time"
+          subtitle={`Events, notifications and errors per ${rangeInfo.bucket} · ${rangeInfo.description.toLowerCase()}`}
+          state={sections.timeline}
+          isEmpty={timelineIsEmpty}
+          emptyTitle="No activity in this period"
+          emptyMessage="Events and notifications will appear here as services report them. Try a longer time range."
+          skeleton={<ChartSkeleton />}
+          onRetry={dashboard.refresh}
+          actions={
+            <Link to="/analytics" className="btn btn-outline btn-sm">
+              Deep dive
+            </Link>
+          }
+        >
+          {timeline && (
+            <ActivityChart data={timeline} bucket={rangeInfo.bucket} rangeDescription={rangeInfo.description} />
+          )}
+        </DashboardSection>
 
-          <div style={{ height: '280px', width: '100%' }}>
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie
-                  data={distributions?.eventsByService || []}
-                  dataKey="value"
-                  nameKey="name"
-                  cx="50%"
-                  cy="45%"
-                  innerRadius={55}
-                  outerRadius={80}
-                  paddingAngle={4}
-                >
-                  {(distributions?.eventsByService || []).map((entry, index) => (
-                    <Cell
-                      key={`cell-${index}`}
-                      fill={SERVICE_COLORS[entry.name] || '#64748b'}
-                    />
-                  ))}
-                </Pie>
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: '#111827',
-                    borderColor: '#374151',
-                    borderRadius: '8px',
-                    fontSize: '12px',
-                  }}
-                />
-                <Legend
-                  verticalAlign="bottom"
-                  iconSize={8}
-                  wrapperStyle={{ fontSize: '11px', color: '#9ca3af' }}
-                />
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
+        <DashboardSection
+          title="Service health"
+          subtitle="Live infrastructure status"
+          state={{ status: 'success', data: systemHealth || {} }}
+        >
+          <ServiceHealthPanel systemHealth={systemHealth} />
+        </DashboardSection>
       </div>
 
-      {/* Two-Column Feeds: Recent Events & Notifications */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(380px, 1fr))', gap: '20px' }}>
-        {/* Recent Events */}
-        <div className="card">
-          <div className="card-header">
-            <div>
-              <div className="card-title">Recent Ingested Events</div>
-              <div className="card-subtitle">Real-time pipeline stream</div>
-            </div>
-            <button onClick={() => navigate('/events')} className="btn btn-outline btn-sm">
-              View All
-            </button>
-          </div>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            {recentEvents.length === 0 ? (
-              <div className="empty-state">No recent events found</div>
-            ) : (
-              recentEvents.map((event) => (
-                <div
-                  key={event._id}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    padding: '10px 12px',
-                    borderRadius: 'var(--radius-sm)',
-                    backgroundColor: 'var(--bg-tertiary)',
-                    fontSize: '13px',
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                    <Badge type={event.status}>{event.status}</Badge>
-                    <div>
-                      <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
-                        {event.eventType}
-                      </div>
-                      <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                        Service: {event.service} • {new Date(event.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                      </div>
-                    </div>
-                  </div>
+      {/* Breakdowns */}
+      <div className="dashboard-grid dashboard-grid--halves">
+        <DashboardSection
+          title="Events by service"
+          subtitle={`Where events originated · ${rangeInfo.description.toLowerCase()}`}
+          state={sections.distributions}
+          isEmpty={!!distributions && distributions.eventsByService.length === 0}
+          emptyTitle="No events recorded"
+          emptyMessage="There were no events from any service in this period."
+          skeleton={<ListSkeleton rows={5} />}
+          onRetry={dashboard.refresh}
+        >
+          {distributions && (
+            <>
+              <BreakdownList
+                label="Events by service"
+                items={distributions.eventsByService}
+                getLabel={(name) => labelFor(EVENT_SERVICES, name, humanizeIdentifier(name))}
+                getColor={(name) => colorFor(EVENT_SERVICES, name)}
+              />
+              {distributions.eventTypes.length > 0 && (
+                <div className="breakdown-footer">
+                  <h3 className="breakdown-subheading">Most frequent event types</h3>
+                  <ul className="tag-list" aria-label="Most frequent event types">
+                    {distributions.eventTypes.slice(0, 5).map((type) => (
+                      <li key={type.name} className="tag">
+                        <code>{type.name}</code> <span className="tag-count">{formatCount(type.value)}</span>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
-              ))
-            )}
-          </div>
-        </div>
+              )}
+            </>
+          )}
+        </DashboardSection>
 
-        {/* Recent Notifications */}
-        <div className="card">
-          <div className="card-header">
-            <div>
-              <div className="card-title">Recent Notifications</div>
-              <div className="card-subtitle">Inbox & alert dispatching</div>
-            </div>
-            <button onClick={() => navigate('/notifications')} className="btn btn-outline btn-sm">
-              View All
-            </button>
-          </div>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            {recentNotifications.length === 0 ? (
-              <div className="empty-state">No notifications right now</div>
-            ) : (
-              recentNotifications.map((notif) => (
-                <div
-                  key={notif._id}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    padding: '10px 12px',
-                    borderRadius: 'var(--radius-sm)',
-                    backgroundColor: notif.read ? 'var(--bg-tertiary)' : 'rgba(59, 130, 246, 0.08)',
-                    borderLeft: notif.read ? 'none' : '3px solid var(--primary)',
-                    fontSize: '13px',
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
-                    <Badge type={notif.type}>{notif.type}</Badge>
-                    <div style={{ overflow: 'hidden' }}>
-                      <div
-                        style={{
-                          fontWeight: notif.read ? 500 : 600,
-                          color: 'var(--text-primary)',
-                          whiteSpace: 'nowrap',
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                        }}
-                      >
-                        {notif.title}
-                      </div>
-                      <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                        via {notif.channel} • {new Date(notif.createdAt).toLocaleDateString()}
-                      </div>
-                    </div>
-                  </div>
-
-                  {!notif.read && (
-                    <button
-                      onClick={() => handleMarkNotificationRead(notif._id)}
-                      className="btn btn-outline btn-sm"
-                      style={{ fontSize: '11px', padding: '3px 8px' }}
-                    >
-                      Read
-                    </button>
-                  )}
+        <DashboardSection
+          title="Notification delivery"
+          subtitle={`Delivery outcome and channel · ${rangeInfo.description.toLowerCase()}`}
+          state={sections.distributions}
+          isEmpty={!!distributions && distributions.notificationsByStatus.length === 0}
+          emptyTitle="No notifications sent"
+          emptyMessage="Delivery results will appear here once notifications are dispatched."
+          skeleton={<ListSkeleton rows={4} />}
+          onRetry={dashboard.refresh}
+        >
+          {distributions && (
+            <>
+              <BreakdownList
+                label="Notifications by delivery status"
+                items={distributions.notificationsByStatus}
+                getLabel={(name) => labelFor(DELIVERY_STATUSES, name, humanizeIdentifier(name))}
+                getColor={(name) => colorFor(DELIVERY_STATUSES, name)}
+              />
+              {distributions.notificationsByChannel.length > 0 && (
+                <div className="breakdown-footer">
+                  <h3 className="breakdown-subheading">By channel</h3>
+                  <BreakdownList
+                    label="Notifications by channel"
+                    items={distributions.notificationsByChannel}
+                    getLabel={(name) => labelFor(NOTIFICATION_CHANNELS, name, humanizeIdentifier(name))}
+                    getColor={(name) => colorFor(NOTIFICATION_CHANNELS, name)}
+                  />
                 </div>
-              ))
-            )}
+              )}
+            </>
+          )}
+        </DashboardSection>
+      </div>
+
+      {/* Recent activity */}
+      <div className="dashboard-grid dashboard-grid--halves">
+        <DashboardSection
+          title="Recent events"
+          subtitle="Latest events ingested across services"
+          state={sections.recentEvents}
+          isEmpty={!!sections.recentEvents.data && sections.recentEvents.data.length === 0}
+          emptyTitle="No events yet"
+          emptyMessage="Events will appear here as services report them."
+          skeleton={<ListSkeleton rows={6} />}
+          onRetry={dashboard.refresh}
+          actions={
+            <Link to="/events" className="btn btn-outline btn-sm">
+              View all
+            </Link>
+          }
+        >
+          {sections.recentEvents.data && <RecentEventsList events={sections.recentEvents.data} />}
+        </DashboardSection>
+
+        <DashboardSection
+          title="Recent notifications"
+          subtitle="Your latest alerts and their delivery status"
+          state={sections.recentNotifications}
+          isEmpty={!!sections.recentNotifications.data && sections.recentNotifications.data.length === 0}
+          emptyTitle="You’re all caught up"
+          emptyMessage="New notifications addressed to you will appear here."
+          skeleton={<ListSkeleton rows={5} />}
+          onRetry={dashboard.refresh}
+          actions={
+            <Link to="/notifications" className="btn btn-outline btn-sm">
+              View all
+            </Link>
+          }
+        >
+          {sections.recentNotifications.data && (
+            <RecentNotificationsList
+              notifications={sections.recentNotifications.data}
+              onMarkRead={dashboard.markNotificationRead}
+            />
+          )}
+        </DashboardSection>
+      </div>
+
+      {/* Event simulator (existing feature; uses POST /events/simulate) */}
+      <section className="card dashboard-simulator" aria-labelledby="dashboard-simulator-heading">
+        <div className="dashboard-simulator-intro">
+          <div className="dashboard-simulator-icon" aria-hidden="true">
+            <Zap size={20} />
+          </div>
+          <div>
+            <h2 id="dashboard-simulator-heading" className="card-title">
+              Event simulator
+            </h2>
+            <p className="card-subtitle">
+              Emit a test event from a service to see ingestion, caching and aggregation update live.
+            </p>
           </div>
         </div>
-      </div>
+        <div className="dashboard-simulator-actions">
+          {SIMULATIONS.map((sim) => (
+            <button
+              key={sim.type}
+              type="button"
+              onClick={() => dashboard.simulateEvent(sim.type, sim.label)}
+              className="btn btn-secondary btn-sm"
+              style={sim.danger ? { color: 'var(--error)' } : undefined}
+              disabled={dashboard.simulation.status === 'pending' || dashboard.mode === 'demo'}
+            >
+              + {sim.label}
+            </button>
+          ))}
+        </div>
+        <p
+          className={`dashboard-simulator-status dashboard-simulator-status--${dashboard.simulation.status}`}
+          role="status"
+        >
+          {dashboard.mode === 'demo'
+            ? 'The simulator needs the live backend and is disabled in demo mode.'
+            : dashboard.simulation.message}
+        </p>
+      </section>
     </div>
   );
 };

@@ -1,5 +1,3 @@
-import React from 'react';
-
 const Badge = ({ type = 'neutral', text, children, icon: Icon }) => {
   let badgeClass = 'badge badge-neutral';
 

@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { clearStoredSession, getStoredToken, PUBLIC_AUTH_PATHS } from '../utils/authSession';
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL || 'http://localhost:5000/api',
@@ -11,7 +12,7 @@ const api = axios.create({
 // Request interceptor to attach JWT auth token
 api.interceptors.request.use(
   (config) => {
-    const token = localStorage.getItem('token');
+    const token = getStoredToken();
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
@@ -20,26 +21,71 @@ api.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
+// Several requests usually fail together when a token dies; redirect only once.
+let isEndingSession = false;
+
+// End the session and send the user to login with a reason banner. The current
+// path is kept (and re-validated on the login page) so they can pick up where they were.
+const endSession = (reasonParam) => {
+  clearStoredSession();
+  const { pathname, search } = window.location;
+  if (isEndingSession || PUBLIC_AUTH_PATHS.includes(pathname)) return;
+  isEndingSession = true;
+  const params = new URLSearchParams({ [reasonParam]: 'true', from: `${pathname}${search}` });
+  window.location.href = `/login?${params.toString()}`;
+};
+
 // Response interceptor to handle token expiration & standardized errors
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response && error.response.status === 401) {
-      const isAuthEndpoint =
-        error.config.url?.includes('/auth/login') ||
-        error.config.url?.includes('/auth/register');
+    const status = error.response?.status;
+    // Login/register errors are credential problems, and a 401 on logout just means
+    // the token was already invalid — none of these end a live session.
+    const isAuthEndpoint =
+      error.config?.url?.includes('/auth/login') ||
+      error.config?.url?.includes('/auth/register') ||
+      error.config?.url?.includes('/auth/logout');
 
-      if (!isAuthEndpoint) {
-        localStorage.removeItem('token');
-        localStorage.removeItem('user');
-        if (window.location.pathname !== '/login') {
-          window.location.href = '/login?expired=true';
-        }
+    if (!isAuthEndpoint) {
+      if (status === 401) {
+        endSession('expired');
+      } else if (status === 403 && error.response.data?.error?.code === 'ACCOUNT_SUSPENDED') {
+        // Every request from a suspended account fails, so the session is dead.
+        // Other 403s (e.g. INSUFFICIENT_PERMISSIONS) are per-request and left to callers.
+        endSession('suspended');
       }
     }
     return Promise.reject(error);
   }
 );
+
+// Turn an axios error into a user-facing message, distinguishing
+// network/timeout/rate-limit/server failures from API validation errors.
+export const getApiErrorMessage = (error, fallback = 'Something went wrong. Please try again.') => {
+  if (!error?.response) {
+    if (error?.code === 'ECONNABORTED' || error?.code === 'ETIMEDOUT') {
+      return 'The server took too long to respond. Please try again.';
+    }
+    return 'Unable to reach the server. Check your connection and try again.';
+  }
+
+  const { status, data } = error.response;
+
+  if (status === 429) {
+    return data?.error?.message || 'Too many attempts. Please wait a moment and try again.';
+  }
+  if (status >= 500) {
+    return 'The server encountered an error. Please try again shortly.';
+  }
+
+  const details = data?.error?.details;
+  if (Array.isArray(details) && details.length > 0 && typeof details[0] === 'string') {
+    return details.join(' ');
+  }
+
+  return data?.error?.message || fallback;
+};
 
 // Service API abstractions
 export const authApi = {
@@ -50,7 +96,8 @@ export const authApi = {
 };
 
 export const eventsApi = {
-  getEvents: (params) => api.get('/events', { params }),
+  // Optional `config` (e.g. { signal }) lets callers cancel superseded list requests.
+  getEvents: (params, config) => api.get('/events', { params, ...config }),
   getEventById: (id) => api.get(`/events/${id}`),
   getEventStats: () => api.get('/events/stats'),
   createEvent: (data) => api.post('/events', data),
@@ -58,7 +105,7 @@ export const eventsApi = {
 };
 
 export const notificationsApi = {
-  getNotifications: (params) => api.get('/notifications', { params }),
+  getNotifications: (params, config) => api.get('/notifications', { params, ...config }),
   getStats: () => api.get('/notifications/stats'),
   markAsRead: (id) => api.patch(`/notifications/${id}/read`),
   markAllAsRead: () => api.patch('/notifications/read-all'),

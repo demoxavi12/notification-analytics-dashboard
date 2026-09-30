@@ -1,402 +1,440 @@
-import React, { useState, useEffect } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
+import { AlertTriangle, CheckCheck, CheckCircle2, FilterX, Plus, RefreshCw } from 'lucide-react';
+import { useAuth } from '../context/useAuth';
+import useUrlFilters from '../hooks/useUrlFilters';
+import usePaginatedQuery from '../hooks/usePaginatedQuery';
+import useNow from '../hooks/useNow';
 import {
-  Bell,
-  CheckCheck,
-  Filter,
-  Plus,
-  RefreshCw,
-  Mail,
-  Smartphone,
-  MessageSquare,
-  Trash2,
-  CheckCircle,
-} from 'lucide-react';
-import { notificationsApi } from '../services/api';
-import Badge from '../components/common/Badge';
+  NOTIFICATION_FILTER_SCHEMA,
+  NOTIFICATION_PAGE_SIZES,
+  deleteNotification,
+  fetchNotifications,
+  markAllNotificationsRead,
+  markNotificationRead,
+  sendTestNotification,
+} from '../features/notifications/notificationsService';
+import { getApiErrorMessage } from '../services/api';
+import { DELIVERY_STATUSES, NOTIFICATION_CHANNELS, NOTIFICATION_TYPES } from '../utils/domainLabels';
+import { formatCount } from '../utils/formatters';
+import SearchField from '../components/common/SearchField';
+import FilterSelect from '../components/common/FilterSelect';
+import Pagination from '../components/common/Pagination';
+import StateMessage from '../components/common/StateMessage';
 import Modal from '../components/common/Modal';
+import NotificationList from '../components/notifications/NotificationList';
+import NotificationDetails from '../components/notifications/NotificationDetails';
+import TestNotificationForm from '../components/notifications/TestNotificationForm';
+
+const toOptions = (map, allLabel) => [
+  { value: 'all', label: allLabel },
+  ...Object.entries(map).map(([value, { label }]) => ({ value, label })),
+];
+const TYPE_OPTIONS = toOptions(NOTIFICATION_TYPES, 'All types');
+const CHANNEL_OPTIONS = toOptions(NOTIFICATION_CHANNELS, 'All channels');
+const STATUS_OPTIONS = toOptions(DELIVERY_STATUSES, 'All deliveries');
+const SCOPE_OPTIONS = [
+  { value: 'all', label: 'All recipients' },
+  { value: 'mine', label: 'Only mine' },
+];
+const READ_OPTIONS = [
+  { value: 'all', label: 'All' },
+  { value: 'false', label: 'Unread' },
+  { value: 'true', label: 'Read' },
+];
+
+const ListSkeleton = ({ rows }) => (
+  <div className="skeleton-list" aria-hidden="true">
+    {Array.from({ length: Math.min(rows, 8) }, (_, i) => (
+      <div key={i} className="skeleton skeleton-card" />
+    ))}
+  </div>
+);
 
 const NotificationsPage = () => {
-  const [notifications, setNotifications] = useState([]);
-  const [pagination, setPagination] = useState({ page: 1, limit: 10, total: 0, totalPages: 1 });
-  const [filterRead, setFilterRead] = useState('all');
-  const [filterType, setFilterType] = useState('all');
-  const [filterChannel, setFilterChannel] = useState('all');
-  const [isLoading, setIsLoading] = useState(true);
-  const [unreadCount, setUnreadCount] = useState(0);
-
-  // New notification modal
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [newNotif, setNewNotif] = useState({
-    title: 'Cluster Node Scaling Event',
-    message: 'Node us-east-worker-4 was automatically provisioned to handle peak traffic.',
-    type: 'info',
-    channel: 'in-app',
-  });
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
+  const { isAdmin } = useAuth();
   const { refreshUnreadCount } = useOutletContext() || {};
+  const { filters: urlFilters, updateFilters, resetFilters, activeFilterCount } = useUrlFilters(NOTIFICATION_FILTER_SCHEMA);
+  // The scope control is admin-only UI; non-admins are always scoped server-side anyway.
+  const filters = useMemo(() => (isAdmin ? urlFilters : { ...urlFilters, scope: 'all' }), [isAdmin, urlFilters]);
+  const query = usePaginatedQuery(fetchNotifications, filters, 'Could not load notifications.');
+  const { updateData } = query; // stable; keeps memoized callbacks stable
+  const now = useNow();
 
-  const fetchNotifications = async (page = 1) => {
-    setIsLoading(true);
-    try {
-      const res = await notificationsApi.getNotifications({
-        page,
-        limit: pagination.limit,
-        read: filterRead !== 'all' ? filterRead : undefined,
-        type: filterType !== 'all' ? filterType : undefined,
-        channel: filterChannel !== 'all' ? filterChannel : undefined,
-      });
+  const [pendingIds, setPendingIds] = useState(() => new Set());
+  // Synchronous in-flight guard: state updates lag behind rapid double clicks.
+  const inFlightRef = useRef(new Set());
+  const markAllLockRef = useRef(false);
+  const deleteLockRef = useRef(false);
+  // After a delete the triggering button no longer exists; move focus to the
+  // results region once the list has reloaded so keyboard users keep their place.
+  const resultsRef = useRef(null);
+  const focusResultsRef = useRef(false);
+  const [selected, setSelected] = useState(null);
+  const [pendingDelete, setPendingDelete] = useState(null);
+  const [deleteState, setDeleteState] = useState({ busy: false, error: '' });
+  const [isTestOpen, setIsTestOpen] = useState(false);
+  const [isMarkingAll, setIsMarkingAll] = useState(false);
+  const [notice, setNotice] = useState(null); // { tone: 'success' | 'error', text }
 
-      setNotifications(res.data.data || []);
-      setPagination(res.data.pagination);
-      setUnreadCount(res.data.unreadCount || 0);
-      if (refreshUnreadCount) refreshUnreadCount();
-    } catch (err) {
-      console.error('Failed to fetch notifications:', err);
-    } finally {
-      setIsLoading(false);
-    }
-  };
+  const items = query.data?.items;
+  const pagination = query.data?.pagination;
+  const unreadCount = query.data?.unreadCount ?? null;
+  const hasData = Boolean(query.data);
+  const showRecipient = isAdmin && filters.scope !== 'mine';
+
+  // Keep the open details dialog in sync with list updates (e.g. after mark-read).
+  const selectedNotification = useMemo(
+    () => (selected ? items?.find((n) => n.id === selected.id) || selected : null),
+    [selected, items]
+  );
+
+  const pageOutOfRange =
+    query.status === 'success' && pagination && pagination.total > 0 && items.length === 0 && pagination.page > pagination.totalPages;
+  const lastPage = pagination?.totalPages;
+  useEffect(() => {
+    if (pageOutOfRange) updateFilters({ page: lastPage });
+  }, [pageOutOfRange, lastPage, updateFilters]);
 
   useEffect(() => {
-    fetchNotifications(1);
-  }, [filterRead, filterType, filterChannel]);
-
-  const handleMarkAsRead = async (id) => {
-    try {
-      await notificationsApi.markAsRead(id);
-      setNotifications((prev) =>
-        prev.map((n) => (n._id === id ? { ...n, read: true } : n))
-      );
-      setUnreadCount((c) => Math.max(0, c - 1));
-      if (refreshUnreadCount) refreshUnreadCount();
-    } catch (err) {
-      console.error('Failed to mark read:', err);
+    if (focusResultsRef.current && query.status === 'success') {
+      focusResultsRef.current = false;
+      resultsRef.current?.focus();
     }
-  };
+  }, [query.status, query.data]);
+
+  const setPending = useCallback((id, isPending) => {
+    setPendingIds((prev) => {
+      const next = new Set(prev);
+      if (isPending) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }, []);
+
+  const setItemRead = useCallback(
+    (id, read, unread) =>
+      updateData((data) => ({
+        ...data,
+        items: data.items.map((n) => (n.id === id ? { ...n, read } : n)),
+        unreadCount: unread ?? data.unreadCount,
+      })),
+    [updateData]
+  );
+
+  const handleMarkRead = useCallback(
+    async (notification) => {
+      if (inFlightRef.current.has(notification.id)) return;
+      inFlightRef.current.add(notification.id);
+      setPending(notification.id, true);
+      setNotice(null);
+      setItemRead(notification.id, true); // optimistic
+      try {
+        const result = await markNotificationRead(notification.id);
+        setItemRead(notification.id, true, result.unreadCount);
+        refreshUnreadCount?.();
+      } catch (err) {
+        setItemRead(notification.id, false);
+        setNotice({ tone: 'error', text: getApiErrorMessage(err, 'Could not mark the notification as read.') });
+      } finally {
+        inFlightRef.current.delete(notification.id);
+        setPending(notification.id, false);
+      }
+    },
+    [setPending, setItemRead, refreshUnreadCount]
+  );
 
   const handleMarkAllRead = async () => {
+    if (markAllLockRef.current) return;
+    markAllLockRef.current = true;
+    setIsMarkingAll(true);
+    setNotice(null);
     try {
-      await notificationsApi.markAllAsRead();
-      setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
-      setUnreadCount(0);
-      if (refreshUnreadCount) refreshUnreadCount();
+      await markAllNotificationsRead();
+      setNotice({ tone: 'success', text: 'All of your notifications are marked as read.' });
+      query.reload();
+      refreshUnreadCount?.();
     } catch (err) {
-      console.error('Failed to mark all read:', err);
-    }
-  };
-
-  const handleDelete = async (id) => {
-    try {
-      await notificationsApi.deleteNotification(id);
-      setNotifications((prev) => prev.filter((n) => n._id !== id));
-      if (refreshUnreadCount) refreshUnreadCount();
-    } catch (err) {
-      console.error('Failed to delete notification:', err);
-    }
-  };
-
-  const handleCreateNotification = async (e) => {
-    e.preventDefault();
-    setIsSubmitting(true);
-    try {
-      await notificationsApi.createNotification(newNotif);
-      setIsModalOpen(false);
-      fetchNotifications(1);
-    } catch (err) {
-      alert('Failed to dispatch notification: ' + (err.response?.data?.error?.message || err.message));
+      setNotice({ tone: 'error', text: getApiErrorMessage(err, 'Could not mark notifications as read.') });
     } finally {
-      setIsSubmitting(false);
+      markAllLockRef.current = false;
+      setIsMarkingAll(false);
     }
   };
 
-  const getChannelIcon = (channel) => {
-    switch (channel) {
-      case 'email':
-        return <Mail size={14} />;
-      case 'push':
-        return <Smartphone size={14} />;
-      case 'in-app':
-      default:
-        return <MessageSquare size={14} />;
+  const openDelete = useCallback((notification) => {
+    setDeleteState({ busy: false, error: '' });
+    setPendingDelete(notification);
+  }, []);
+  const closeDelete = useCallback(() => {
+    if (!deleteState.busy) setPendingDelete(null);
+  }, [deleteState.busy]);
+
+  const confirmDelete = async () => {
+    if (!pendingDelete || deleteLockRef.current) return;
+    deleteLockRef.current = true;
+    setDeleteState({ busy: true, error: '' });
+    try {
+      await deleteNotification(pendingDelete.id);
+      setNotice({ tone: 'success', text: `Deleted “${pendingDelete.title}”.` });
+      if (selected?.id === pendingDelete.id) setSelected(null);
+      focusResultsRef.current = true;
+      setPendingDelete(null);
+      setDeleteState({ busy: false, error: '' });
+      // Removing the only item on a later page would leave an empty page: step back.
+      if (items.length === 1 && filters.page > 1) updateFilters({ page: filters.page - 1 });
+      else query.reload();
+      refreshUnreadCount?.();
+    } catch (err) {
+      setDeleteState({ busy: false, error: getApiErrorMessage(err, 'The notification could not be deleted.') });
+    } finally {
+      deleteLockRef.current = false;
     }
   };
+
+  const handleSendTest = async (payload) => {
+    await sendTestNotification(payload); // errors are shown inside the form
+    setIsTestOpen(false);
+    setNotice({ tone: 'success', text: `Sent “${payload.title}” to your account.` });
+    if (filters.page !== 1) updateFilters({ page: 1 });
+    else query.reload();
+    refreshUnreadCount?.();
+  };
+
+  const closeDetails = useCallback(() => setSelected(null), []);
+  const closeTest = useCallback(() => setIsTestOpen(false), []);
+  // Scope is not a "filter" for non-admins, so don't count it.
+  const filterCount = isAdmin ? activeFilterCount : activeFilterCount - (urlFilters.scope !== 'all' ? 1 : 0);
+
+  let results;
+  if (query.status === 'loading' && !hasData) {
+    results = <ListSkeleton rows={Number(filters.limit)} />;
+  } else if (query.status === 'error') {
+    results = (
+      <StateMessage
+        tone="error"
+        announce
+        title="Couldn’t load notifications"
+        message={query.isNetworkError ? 'The API server is unreachable. Check that the backend is running, then retry.' : query.error}
+        onRetry={query.reload}
+      />
+    );
+  } else if (items.length === 0) {
+    results = (
+      <StateMessage
+        title={filterCount ? 'No notifications match these filters' : 'No notifications yet'}
+        message={filterCount ? 'Try a different search term or filter.' : 'New notifications will appear here.'}
+        action={
+          filterCount ? (
+            <button type="button" className="btn btn-outline btn-sm" onClick={resetFilters}>
+              <FilterX size={14} aria-hidden="true" /> Clear filters
+            </button>
+          ) : null
+        }
+      />
+    );
+  } else {
+    results = (
+      <NotificationList
+        notifications={items}
+        now={now}
+        label="Notifications"
+        showRecipient={showRecipient}
+        pendingIds={pendingIds}
+        onOpen={setSelected}
+        onMarkRead={handleMarkRead}
+        onDelete={openDelete}
+      />
+    );
+  }
 
   return (
-    <div>
-      {/* Header */}
+    <div className="list-page">
       <div className="page-header">
         <div>
           <h1 className="page-title">Notifications Center</h1>
           <p className="page-subtitle">
-            System dispatch logs, multi-channel alerts, and read markers
+            Delivery log, multi-channel alerts and read state
+            {unreadCount !== null && (
+              <>
+                {' · '}
+                <strong className="unread-summary">
+                  {unreadCount === 0 ? 'You’re all caught up' : `${formatCount(unreadCount)} unread for you`}
+                </strong>
+              </>
+            )}
           </p>
         </div>
+        <div className="page-actions">
+          <button
+            type="button"
+            onClick={query.reload}
+            className="btn btn-secondary btn-sm"
+            disabled={query.status === 'loading'}
+            aria-label={query.status === 'loading' ? 'Refreshing notifications' : 'Refresh notifications'}
+          >
+            <RefreshCw size={14} className={query.status === 'loading' ? 'spin' : undefined} aria-hidden="true" />
+            <span>Refresh</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleMarkAllRead}
+            className="btn btn-secondary btn-sm"
+            disabled={isMarkingAll || !unreadCount}
+            title="Marks all of your own notifications as read"
+          >
+            <CheckCheck size={14} aria-hidden="true" />
+            {isMarkingAll ? 'Marking…' : 'Mark all mine read'}
+          </button>
+          <button type="button" onClick={() => setIsTestOpen(true)} className="btn btn-primary btn-sm">
+            <Plus size={14} aria-hidden="true" /> Test notification
+          </button>
+        </div>
+      </div>
 
-        <div style={{ display: 'flex', gap: '10px' }}>
-          {unreadCount > 0 && (
-            <button
-              onClick={handleMarkAllRead}
-              className="btn btn-secondary btn-sm"
-            >
-              <CheckCheck size={14} /> Mark All as Read
+      {notice && (
+        <div
+          className={`dashboard-notice dashboard-notice--${notice.tone === 'error' ? 'error' : 'success'}`}
+          role={notice.tone === 'error' ? 'alert' : 'status'}
+        >
+          {notice.tone === 'error' ? <AlertTriangle size={16} aria-hidden="true" /> : <CheckCircle2 size={16} aria-hidden="true" />}
+          <span>{notice.text}</span>
+          <button type="button" className="btn btn-outline btn-sm" onClick={() => setNotice(null)}>
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      <section className="card filter-bar" aria-label="Notification filters">
+        <SearchField
+          key={filters.q}
+          value={filters.q}
+          onSearch={(q) => updateFilters({ q })}
+          label="Search notifications by title or message"
+          placeholder="Search title or message…"
+        />
+        <div className="filter-fields">
+          <fieldset className="segmented segmented--filter">
+            <legend className="filter-label">Read state</legend>
+            <div className="segmented-options">
+              {READ_OPTIONS.map((option) => (
+                <label key={option.value} className="segmented-option">
+                  <input
+                    type="radio"
+                    className="sr-only"
+                    name="notification-read-filter"
+                    value={option.value}
+                    checked={filters.read === option.value}
+                    onChange={() => updateFilters({ read: option.value })}
+                  />
+                  <span>{option.label}</span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+          <FilterSelect label="Type" value={filters.type} options={TYPE_OPTIONS} onChange={(type) => updateFilters({ type })} />
+          <FilterSelect label="Channel" value={filters.channel} options={CHANNEL_OPTIONS} onChange={(channel) => updateFilters({ channel })} />
+          <FilterSelect label="Delivery" value={filters.status} options={STATUS_OPTIONS} onChange={(status) => updateFilters({ status })} />
+          {isAdmin && (
+            <FilterSelect label="Recipients" value={filters.scope} options={SCOPE_OPTIONS} onChange={(scope) => updateFilters({ scope })} />
+          )}
+          {filterCount > 0 && (
+            <button type="button" className="btn btn-outline btn-sm filter-reset" onClick={resetFilters}>
+              <FilterX size={14} aria-hidden="true" /> Clear filters ({filterCount})
             </button>
           )}
-          <button
-            onClick={() => fetchNotifications(pagination.page)}
-            className="btn btn-secondary btn-sm"
-          >
-            <RefreshCw size={14} className={isLoading ? 'loading-spinner' : ''} />
-            Refresh
-          </button>
-          <button
-            onClick={() => setIsModalOpen(true)}
-            className="btn btn-primary btn-sm"
-          >
-            <Plus size={14} /> Dispatch Notification
-          </button>
         </div>
-      </div>
+      </section>
 
-      {/* Filter Tabs / Controls */}
-      <div className="card" style={{ marginBottom: '20px', padding: '16px 20px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '16px' }}>
-          {/* Read status tabs */}
-          <div style={{ display: 'flex', gap: '6px' }}>
-            <button
-              onClick={() => setFilterRead('all')}
-              className={`btn btn-sm ${filterRead === 'all' ? 'btn-primary' : 'btn-outline'}`}
-            >
-              All Alerts
-            </button>
-            <button
-              onClick={() => setFilterRead('false')}
-              className={`btn btn-sm ${filterRead === 'false' ? 'btn-primary' : 'btn-outline'}`}
-            >
-              Unread {unreadCount > 0 && `(${unreadCount})`}
-            </button>
-            <button
-              onClick={() => setFilterRead('true')}
-              className={`btn btn-sm ${filterRead === 'true' ? 'btn-primary' : 'btn-outline'}`}
-            >
-              Read
-            </button>
-          </div>
-
-          {/* Select filters */}
-          <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>Type:</span>
-              <select
-                className="select"
-                value={filterType}
-                onChange={(e) => setFilterType(e.target.value)}
-              >
-                <option value="all">All Types</option>
-                <option value="info">Info</option>
-                <option value="success">Success</option>
-                <option value="warning">Warning</option>
-                <option value="error">Error</option>
-              </select>
-            </div>
-
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>Channel:</span>
-              <select
-                className="select"
-                value={filterChannel}
-                onChange={(e) => setFilterChannel(e.target.value)}
-              >
-                <option value="all">All Channels</option>
-                <option value="in-app">In-App</option>
-                <option value="email">Email</option>
-                <option value="push">Push</option>
-              </select>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Notifications List */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-        {isLoading ? (
-          <div style={{ textAlign: 'center', padding: '60px' }}>
-            <div className="loading-spinner" />
-          </div>
-        ) : notifications.length === 0 ? (
-          <div className="card empty-state">
-            <Bell className="empty-icon" />
-            <div style={{ fontSize: '16px', fontWeight: 600, color: 'var(--text-primary)' }}>
-              No notifications found
-            </div>
-            <p style={{ fontSize: '13px', marginTop: '4px' }}>
-              You're all caught up! No notifications match the selected filter.
-            </p>
-          </div>
-        ) : (
-          notifications.map((notif) => (
-            <div
-              key={notif._id}
-              className="card"
-              style={{
-                padding: '16px 20px',
-                backgroundColor: notif.read ? 'var(--bg-secondary)' : 'rgba(31, 41, 55, 0.7)',
-                borderLeft: notif.read ? '1px solid var(--border-color)' : '4px solid var(--primary)',
-                display: 'flex',
-                alignItems: 'flex-start',
-                justifyContent: 'space-between',
-                gap: '16px',
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'flex-start', gap: '14px', flex: 1 }}>
-                <div style={{ marginTop: '2px' }}>
-                  <Badge type={notif.type}>{notif.type}</Badge>
-                </div>
-
-                <div style={{ flex: 1 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                    <h3
-                      style={{
-                        fontSize: '15px',
-                        fontWeight: notif.read ? 500 : 700,
-                        color: 'var(--text-primary)',
-                      }}
-                    >
-                      {notif.title}
-                    </h3>
-                    <span
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: '4px',
-                        fontSize: '11px',
-                        color: 'var(--text-muted)',
-                        backgroundColor: 'var(--bg-tertiary)',
-                        padding: '2px 6px',
-                        borderRadius: '4px',
-                      }}
-                    >
-                      {getChannelIcon(notif.channel)} {notif.channel}
-                    </span>
-                    <Badge type={notif.status}>{notif.status}</Badge>
-                  </div>
-
-                  <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: '6px' }}>
-                    {notif.message}
-                  </p>
-
-                  <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '8px' }}>
-                    Sent on {new Date(notif.createdAt).toLocaleString()}
-                    {notif.recipient?.name && ` • Recipient: ${notif.recipient.name}`}
-                  </div>
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                {!notif.read && (
-                  <button
-                    onClick={() => handleMarkAsRead(notif._id)}
-                    className="btn btn-outline btn-sm"
-                    title="Mark as read"
-                  >
-                    <CheckCircle size={14} /> Mark Read
-                  </button>
-                )}
-                <button
-                  onClick={() => handleDelete(notif._id)}
-                  className="btn btn-sm"
-                  style={{
-                    backgroundColor: 'transparent',
-                    color: 'var(--text-muted)',
-                    padding: '6px',
-                    border: 'none',
-                  }}
-                  title="Delete notification"
-                >
-                  <Trash2 size={15} />
-                </button>
-              </div>
-            </div>
-          ))
-        )}
-      </div>
-
-      {/* Dispatch Modal */}
-      <Modal
-        isOpen={isModalOpen}
-        onClose={() => setIsModalOpen(false)}
-        title="Dispatch Test Notification"
+      <section
+        ref={resultsRef}
+        tabIndex={-1}
+        className="results-section"
+        aria-label="Notification results"
+        aria-busy={query.status === 'loading' || undefined}
       >
-        <form onSubmit={handleCreateNotification}>
-          <div className="input-group">
-            <label className="input-label">Title</label>
-            <input
-              type="text"
-              className="input"
-              value={newNotif.title}
-              onChange={(e) => setNewNotif({ ...newNotif, title: e.target.value })}
-              required
-            />
-          </div>
+        <div className={query.isRefreshing && query.status !== 'error' ? 'is-refreshing' : undefined}>{results}</div>
+        {hasData && query.status !== 'error' && items.length > 0 && (
+          <Pagination
+            pagination={pagination}
+            itemLabel="notifications"
+            onPageChange={(page) => updateFilters({ page })}
+            pageSizes={NOTIFICATION_PAGE_SIZES}
+            onPageSizeChange={(limit) => updateFilters({ limit: String(limit) })}
+            disabled={query.status === 'loading'}
+          />
+        )}
+      </section>
 
-          <div className="input-group">
-            <label className="input-label">Message</label>
-            <textarea
-              className="input"
-              rows={3}
-              value={newNotif.message}
-              onChange={(e) => setNewNotif({ ...newNotif, message: e.target.value })}
-              required
-            />
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-            <div className="input-group">
-              <label className="input-label">Type</label>
-              <select
-                className="select"
-                value={newNotif.type}
-                onChange={(e) => setNewNotif({ ...newNotif, type: e.target.value })}
+      <Modal
+        isOpen={Boolean(selectedNotification)}
+        onClose={closeDetails}
+        title={selectedNotification?.title || 'Notification'}
+        maxWidth="600px"
+        footer={
+          selectedNotification && (
+            <>
+              <button
+                type="button"
+                className="btn btn-danger btn-sm"
+                onClick={() => {
+                  // Close details first so only one dialog (and one Escape handler) is active.
+                  const target = selectedNotification;
+                  setSelected(null);
+                  openDelete(target);
+                }}
               >
-                <option value="info">Info</option>
-                <option value="success">Success</option>
-                <option value="warning">Warning</option>
-                <option value="error">Error</option>
-              </select>
-            </div>
+                Delete
+              </button>
+              {!selectedNotification.read && (
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  onClick={() => handleMarkRead(selectedNotification)}
+                  disabled={pendingIds.has(selectedNotification.id)}
+                >
+                  Mark as read
+                </button>
+              )}
+            </>
+          )
+        }
+      >
+        {selectedNotification && <NotificationDetails notification={selectedNotification} showRecipient={isAdmin} />}
+      </Modal>
 
-            <div className="input-group">
-              <label className="input-label">Channel</label>
-              <select
-                className="select"
-                value={newNotif.channel}
-                onChange={(e) => setNewNotif({ ...newNotif, channel: e.target.value })}
-              >
-                <option value="in-app">In-App</option>
-                <option value="email">Email</option>
-                <option value="push">Push Notification</option>
-              </select>
-            </div>
-          </div>
-
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '20px' }}>
-            <button
-              type="button"
-              onClick={() => setIsModalOpen(false)}
-              className="btn btn-secondary"
-            >
+      <Modal
+        isOpen={Boolean(pendingDelete)}
+        onClose={closeDelete}
+        title="Delete notification?"
+        maxWidth="440px"
+        footer={
+          <>
+            <button type="button" className="btn btn-outline btn-sm" onClick={closeDelete} disabled={deleteState.busy}>
               Cancel
             </button>
-            <button
-              type="submit"
-              className="btn btn-primary"
-              disabled={isSubmitting}
-            >
-              {isSubmitting ? 'Dispatching...' : 'Dispatch Alert'}
+            <button type="button" className="btn btn-danger btn-sm" onClick={confirmDelete} disabled={deleteState.busy} data-autofocus>
+              {deleteState.busy ? 'Deleting…' : 'Delete'}
             </button>
-          </div>
-        </form>
+          </>
+        }
+      >
+        {pendingDelete && (
+          <>
+            <p className="detail-message">
+              “{pendingDelete.title}” will be permanently removed. This can’t be undone.
+            </p>
+            {deleteState.error && (
+              <div className="form-alert" role="alert">
+                {deleteState.error}
+              </div>
+            )}
+          </>
+        )}
+      </Modal>
+
+      <Modal isOpen={isTestOpen} onClose={closeTest} title="Send test notification" maxWidth="520px">
+        <TestNotificationForm onSubmit={handleSendTest} onCancel={closeTest} />
       </Modal>
     </div>
   );
