@@ -139,7 +139,7 @@ export const createDemoDashboardSource = ({ isAdmin }) => {
           totalNotifications: scopedNotifs.length,
           successfulNotifications: delivered,
           failedNotifications: failed,
-          deliveryRate: scopedNotifs.length ? Number(((delivered / scopedNotifs.length) * 100).toFixed(1)) : 100,
+          deliveryRate: scopedNotifs.length ? Number(((delivered / scopedNotifs.length) * 100).toFixed(1)) : null,
           apiRequests: scopedEvents.filter((e) => e.eventType === 'api.request').length,
           errorCount: scopedEvents.filter((e) => e.status === 'error').length,
         },

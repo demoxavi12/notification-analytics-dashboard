@@ -37,9 +37,10 @@ export const fetchEvents = async (filters, { signal } = {}) => {
     startDate: rangeMs ? new Date(Date.now() - rangeMs).toISOString() : undefined,
   };
   const res = await eventsApi.getEvents(params, { signal });
+  const items = normalizeEventList(res.data?.data);
   return {
-    items: normalizeEventList(res.data?.data),
-    pagination: normalizePagination(res.data?.pagination, { page: filters.page, limit: params.limit }),
+    items,
+    pagination: normalizePagination(res.data?.pagination, { page: filters.page, limit: params.limit, itemCount: items.length }),
   };
 };
 

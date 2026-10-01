@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useCallback, useMemo } from 'react';
 import { Link, useOutletContext } from 'react-router-dom';
 import {
   Activity,
@@ -14,7 +14,8 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/useAuth';
 import useDashboardData from '../features/dashboard/useDashboardData';
-import { DASHBOARD_RANGES } from '../features/dashboard/dashboardModel';
+import { DASHBOARD_FILTER_SCHEMA, DASHBOARD_RANGES } from '../features/dashboard/dashboardModel';
+import useUrlFilters from '../hooks/useUrlFilters';
 import KPICard from '../components/common/KPICard';
 import DashboardSection from '../components/dashboard/DashboardSection';
 import ActivityChart from '../components/dashboard/ActivityChart';
@@ -30,6 +31,7 @@ import {
   colorFor,
   labelFor,
 } from '../utils/domainLabels';
+import useDocumentTitle from '../hooks/useDocumentTitle';
 
 
 const SIMULATIONS = [
@@ -50,10 +52,20 @@ const ListSkeleton = ({ rows = 4 }) => (
 );
 
 const DashboardPage = () => {
+  useDocumentTitle('Dashboard');
   const { isAdmin } = useAuth();
   const { refreshUnreadCount, systemHealth } = useOutletContext() || {};
-  const dashboard = useDashboardData({ isAdmin, onUnreadCountChange: refreshUnreadCount });
+  const { filters, updateFilters } = useUrlFilters(DASHBOARD_FILTER_SCHEMA);
+  const dashboard = useDashboardData({ isAdmin, onUnreadCountChange: refreshUnreadCount, range: filters.range });
   const { sections, range, loadedRange } = dashboard;
+
+  // Refresh/retry also re-polls the shell's health + unread count, so service health
+  // isn't left stale (e.g. right after the backend comes back).
+  const { refresh: refreshDashboard } = dashboard;
+  const refreshAll = useCallback(() => {
+    refreshDashboard();
+    refreshUnreadCount?.();
+  }, [refreshDashboard, refreshUnreadCount]);
 
   const rangeInfo = DASHBOARD_RANGES[loadedRange];
   const overview = sections.overview.data;
@@ -146,10 +158,10 @@ const DashboardPage = () => {
         </div>
 
         <div className="dashboard-controls">
-          <RangeSelector value={range} options={DASHBOARD_RANGES} onChange={dashboard.setRange} />
+          <RangeSelector value={range} options={DASHBOARD_RANGES} onChange={(next) => updateFilters({ range: next })} />
           <button
             type="button"
-            onClick={dashboard.refresh}
+            onClick={refreshAll}
             className="btn btn-secondary btn-sm"
             disabled={dashboard.isRefreshing}
             aria-label={dashboard.isRefreshing ? 'Refreshing dashboard' : 'Refresh dashboard'}
@@ -216,7 +228,7 @@ const DashboardPage = () => {
             <AlertTriangle size={20} aria-hidden="true" />
             <p className="section-state-title">Couldn’t load summary metrics</p>
             <p className="section-state-message">{sections.overview.error}</p>
-            <button type="button" className="btn btn-outline btn-sm" onClick={dashboard.refresh}>
+            <button type="button" className="btn btn-outline btn-sm" onClick={refreshAll}>
               <RefreshCw size={14} aria-hidden="true" /> Retry
             </button>
           </div>
@@ -239,7 +251,7 @@ const DashboardPage = () => {
           emptyTitle="No activity in this period"
           emptyMessage="Events and notifications will appear here as services report them. Try a longer time range."
           skeleton={<ChartSkeleton />}
-          onRetry={dashboard.refresh}
+          onRetry={refreshAll}
           actions={
             <Link to="/analytics" className="btn btn-outline btn-sm">
               Deep dive
@@ -270,7 +282,7 @@ const DashboardPage = () => {
           emptyTitle="No events recorded"
           emptyMessage="There were no events from any service in this period."
           skeleton={<ListSkeleton rows={5} />}
-          onRetry={dashboard.refresh}
+          onRetry={refreshAll}
         >
           {distributions && (
             <>
@@ -304,7 +316,7 @@ const DashboardPage = () => {
           emptyTitle="No notifications sent"
           emptyMessage="Delivery results will appear here once notifications are dispatched."
           skeleton={<ListSkeleton rows={4} />}
-          onRetry={dashboard.refresh}
+          onRetry={refreshAll}
         >
           {distributions && (
             <>
@@ -340,7 +352,7 @@ const DashboardPage = () => {
           emptyTitle="No events yet"
           emptyMessage="Events will appear here as services report them."
           skeleton={<ListSkeleton rows={6} />}
-          onRetry={dashboard.refresh}
+          onRetry={refreshAll}
           actions={
             <Link to="/events" className="btn btn-outline btn-sm">
               View all
@@ -358,7 +370,7 @@ const DashboardPage = () => {
           emptyTitle="You’re all caught up"
           emptyMessage="New notifications addressed to you will appear here."
           skeleton={<ListSkeleton rows={5} />}
-          onRetry={dashboard.refresh}
+          onRetry={refreshAll}
           actions={
             <Link to="/notifications" className="btn btn-outline btn-sm">
               View all

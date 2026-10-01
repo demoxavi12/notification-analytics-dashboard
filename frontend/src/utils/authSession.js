@@ -48,4 +48,5 @@ export const getSafeRedirectPath = (candidate, fallback = '/dashboard') => {
 export const SESSION_END_REASONS = {
   expired: 'Your session expired. Please log in again.',
   suspended: 'Your account has been suspended. Please contact an administrator.',
+  inactive: 'Your account has been deactivated. Please contact an administrator.',
 };

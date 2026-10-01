@@ -25,6 +25,7 @@ import Modal from '../components/common/Modal';
 import NotificationList from '../components/notifications/NotificationList';
 import NotificationDetails from '../components/notifications/NotificationDetails';
 import TestNotificationForm from '../components/notifications/TestNotificationForm';
+import useDocumentTitle from '../hooks/useDocumentTitle';
 
 const toOptions = (map, allLabel) => [
   { value: 'all', label: allLabel },
@@ -52,6 +53,7 @@ const ListSkeleton = ({ rows }) => (
 );
 
 const NotificationsPage = () => {
+  useDocumentTitle('Notifications');
   const { isAdmin } = useAuth();
   const { refreshUnreadCount } = useOutletContext() || {};
   const { filters: urlFilters, updateFilters, resetFilters, activeFilterCount } = useUrlFilters(NOTIFICATION_FILTER_SCHEMA);

@@ -1,8 +1,9 @@
-import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Compass, Home, ArrowLeft } from 'lucide-react';
+import useDocumentTitle from '../hooks/useDocumentTitle';
 
 const NotFoundPage = () => {
+  useDocumentTitle('Page not found');
   const navigate = useNavigate();
 
   return (

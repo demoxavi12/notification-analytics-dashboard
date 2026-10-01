@@ -2,7 +2,9 @@ import axios from 'axios';
 import { clearStoredSession, getStoredToken, PUBLIC_AUTH_PATHS } from '../utils/authSession';
 
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || 'http://localhost:5000/api',
+  // VITE_API_URL is baked in at build time. Without it, dev talks to the local API and
+  // production builds use same-origin /api (reverse-proxy setup), never localhost.
+  baseURL: import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:5000/api' : '/api'),
   headers: {
     'Content-Type': 'application/json',
   },
@@ -54,38 +56,18 @@ api.interceptors.response.use(
         // Every request from a suspended account fails, so the session is dead.
         // Other 403s (e.g. INSUFFICIENT_PERMISSIONS) are per-request and left to callers.
         endSession('suspended');
+      } else if (status === 403 && error.response.data?.error?.code === 'ACCOUNT_INACTIVE') {
+        // Deactivated accounts lose access the same way.
+        endSession('inactive');
       }
     }
     return Promise.reject(error);
   }
 );
 
-// Turn an axios error into a user-facing message, distinguishing
-// network/timeout/rate-limit/server failures from API validation errors.
-export const getApiErrorMessage = (error, fallback = 'Something went wrong. Please try again.') => {
-  if (!error?.response) {
-    if (error?.code === 'ECONNABORTED' || error?.code === 'ETIMEDOUT') {
-      return 'The server took too long to respond. Please try again.';
-    }
-    return 'Unable to reach the server. Check your connection and try again.';
-  }
-
-  const { status, data } = error.response;
-
-  if (status === 429) {
-    return data?.error?.message || 'Too many attempts. Please wait a moment and try again.';
-  }
-  if (status >= 500) {
-    return 'The server encountered an error. Please try again shortly.';
-  }
-
-  const details = data?.error?.details;
-  if (Array.isArray(details) && details.length > 0 && typeof details[0] === 'string') {
-    return details.join(' ');
-  }
-
-  return data?.error?.message || fallback;
-};
+// User-facing error messages live in a pure module (unit-tested); re-exported here so
+// existing imports keep working.
+export { getApiErrorMessage } from '../utils/apiErrors';
 
 // Service API abstractions
 export const authApi = {
@@ -114,13 +96,13 @@ export const notificationsApi = {
 };
 
 export const analyticsApi = {
-  getOverview: (params) => api.get('/analytics/overview', { params }),
-  getTimeSeries: (params) => api.get('/analytics/timeseries', { params }),
-  getDistributions: (params) => api.get('/analytics/distributions', { params }),
+  getOverview: (params, config) => api.get('/analytics/overview', { params, ...config }),
+  getTimeSeries: (params, config) => api.get('/analytics/timeseries', { params, ...config }),
+  getDistributions: (params, config) => api.get('/analytics/distributions', { params, ...config }),
 };
 
 export const usersApi = {
-  getUsers: (params) => api.get('/users', { params }),
+  getUsers: (params, config) => api.get('/users', { params, ...config }),
   getUserById: (id) => api.get(`/users/${id}`),
   updateRole: (id, role) => api.patch(`/users/${id}/role`, { role }),
   updateStatus: (id, status) => api.patch(`/users/${id}/status`, { status }),

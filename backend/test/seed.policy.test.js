@@ -58,3 +58,10 @@ test('manual seed script refuses to run against production', () => {
   assert.equal(result.status, 1);
   assert.match(result.stderr, /Refusing to seed: NODE_ENV=production/);
 });
+
+test('seeded demo data is never dated in the future', async () => {
+  await autoSeedIfEmpty({ env: 'development', logger: silent });
+  const now = Date.now() + 1000;
+  assert.equal(await Event.countDocuments({ timestamp: { $gt: new Date(now) } }), 0, 'future-dated events');
+  assert.equal(await Notification.countDocuments({ createdAt: { $gt: new Date(now) } }), 0, 'future-dated notifications');
+});

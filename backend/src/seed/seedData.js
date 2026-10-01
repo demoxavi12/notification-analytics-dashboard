@@ -123,7 +123,9 @@ const populateSeedData = async (clearExisting = true) => {
       const template = serviceEventPool[Math.floor(Math.random() * serviceEventPool.length)];
       const assignedUser = Math.random() > 0.3 ? testUsers[Math.floor(Math.random() * testUsers.length)]._id : null;
       const randomHourOffset = Math.floor(Math.random() * 24) * 60 * 60 * 1000 + Math.floor(Math.random() * 60) * 60 * 1000;
-      const timestamp = new Date(now - day * dayMs + randomHourOffset);
+      // Spread events across the day *before* "now": adding the offset to day 0 used
+      // to create future-dated events ("in 2 hours"), which skewed 24h analytics.
+      const timestamp = new Date(now - day * dayMs - randomHourOffset);
 
       eventsToInsert.push({
         eventType: template.eventType,

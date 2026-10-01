@@ -25,16 +25,9 @@ const seedDatabase = async () => {
   try {
     await populateSeedData(true);
 
-    console.log('\n=============================================');
-    console.log(' Demo credentials ready:');
-    console.log(' Admin User:');
-    console.log('   Email:    admin@saas.local');
-    console.log('   Password: AdminPass123!');
-    console.log(' Regular User:');
-    console.log('   Email:    user@saas.local');
-    console.log('   Password: UserPass123!');
-    console.log('=============================================\n');
-
+    // Credentials are never printed. The local demo accounts are defined in
+    // src/seed/seedData.js (development only; seeding is refused in production).
+    console.log('[Seed] Demo users, events and notifications created (accounts: see src/seed/seedData.js).');
     console.log('Seed completed successfully!');
     process.exit(0);
   } catch (err) {

@@ -1,6 +1,7 @@
 const User = require('../models/User');
 const { successResponse, errorResponse, paginatedResponse } = require('../utils/apiResponse');
 const { asyncHandler } = require('../middleware/errorHandler');
+const { queryString, escapeRegex } = require('../utils/queryInput');
 
 // @desc Get all users (Admin only)
 // @route GET /api/users
@@ -9,7 +10,8 @@ const getAllUsers = asyncHandler(async (req, res) => {
   const page = parseInt(req.query.page, 10) || 1;
   const limit = parseInt(req.query.limit, 10) || 10;
   const skip = (page - 1) * limit;
-  const { role, search } = req.query;
+  const role = queryString(req.query.role);
+  const search = queryString(req.query.search);
 
   const query = {};
 
@@ -18,9 +20,11 @@ const getAllUsers = asyncHandler(async (req, res) => {
   }
 
   if (search) {
+    // Plain-text match, same approach as event/notification search.
+    const pattern = escapeRegex(search);
     query.$or = [
-      { name: { $regex: search, $options: 'i' } },
-      { email: { $regex: search, $options: 'i' } },
+      { name: { $regex: pattern, $options: 'i' } },
+      { email: { $regex: pattern, $options: 'i' } },
     ];
   }
 

@@ -1,7 +1,7 @@
 import { useId } from 'react';
 import StateMessage from '../common/StateMessage';
 
-// Card wrapper for every data-driven dashboard section. It owns the four states
+// Card wrapper for data-driven sections (Dashboard and Analytics). It owns the four states
 // so no section can render as a blank box:
 //   loading (no data yet) -> skeleton
 //   error   (no data)     -> message + retry

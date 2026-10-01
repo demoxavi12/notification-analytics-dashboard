@@ -3,6 +3,7 @@ import { Outlet, useLocation } from 'react-router-dom';
 import Sidebar from '../components/layout/Sidebar';
 import Navbar from '../components/layout/Navbar';
 import useMediaQuery from '../hooks/useMediaQuery';
+import ErrorBoundary from '../components/common/ErrorBoundary';
 import { healthApi, notificationsApi } from '../services/api';
 
 const SIDEBAR_ID = 'app-sidebar';
@@ -38,6 +39,8 @@ const DashboardLayout = () => {
   const location = useLocation();
 
   const menuButtonRef = useRef(null);
+  const mainRef = useRef(null);
+  const previousPathRef = useRef(location.pathname);
   const drawerCloseRef = useRef(null);
   const isMountedRef = useRef(true);
 
@@ -68,6 +71,21 @@ const DashboardLayout = () => {
       return next;
     });
   }, []);
+
+  // Client-side navigation: start the new page at the top and move focus to the main
+  // region so keyboard and screen-reader users land on the new content (not on the
+  // link they just used). Query-string changes (filters, pages) don't trigger this.
+  useEffect(() => {
+    if (previousPathRef.current === location.pathname) return;
+    previousPathRef.current = location.pathname;
+    window.scrollTo(0, 0);
+    mainRef.current?.focus({ preventScroll: true });
+  }, [location.pathname]);
+
+  const skipToMain = (event) => {
+    event.preventDefault();
+    mainRef.current?.focus();
+  };
 
   // Drawer open: move focus into it, lock background scroll, close on Escape.
   // On close: return focus to the menu button if focus was inside the drawer.
@@ -154,6 +172,9 @@ const DashboardLayout = () => {
 
   return (
     <div className="app-container">
+      <a href="#main-content" className="skip-link" onClick={skipToMain}>
+        Skip to main content
+      </a>
       {/* Sidebar navigation (static on desktop, off-canvas drawer below 1024px) */}
       <Sidebar
         id={SIDEBAR_ID}
@@ -179,8 +200,11 @@ const DashboardLayout = () => {
           menuButtonRef={menuButtonRef}
           unreadCount={unreadCount}
         />
-        <main className="page-wrapper" id="main-content">
-          <Outlet context={outletContext} />
+        <main className="page-wrapper" id="main-content" ref={mainRef} tabIndex={-1}>
+          {/* A page crash shows an error here instead of blanking the whole app; resets on navigation. */}
+          <ErrorBoundary resetKey={location.pathname}>
+            <Outlet context={outletContext} />
+          </ErrorBoundary>
         </main>
       </div>
     </div>

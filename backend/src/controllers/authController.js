@@ -91,6 +91,12 @@ const login = asyncHandler(async (req, res) => {
     return errorResponse(res, 'Account is suspended', 403, 'ACCOUNT_SUSPENDED');
   }
 
+  // "inactive" means deactivated (see userController: changing a status away from
+  // "active" is a deactivation), so it blocks sign-in like a suspension does.
+  if (user.status === 'inactive') {
+    return errorResponse(res, 'This account has been deactivated. Please contact an administrator.', 403, 'ACCOUNT_INACTIVE');
+  }
+
   const token = generateToken(user._id);
 
   // Log successful login

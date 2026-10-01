@@ -65,7 +65,8 @@ const getOverview = asyncHandler(async (req, res) => {
 
   const deliveredCount = notificationStats.find((s) => s._id === 'delivered')?.count || 0;
   const failedCount = notificationStats.find((s) => s._id === 'failed')?.count || 0;
-  const deliveryRate = totalNotifications > 0 ? ((deliveredCount / totalNotifications) * 100).toFixed(1) : '100.0';
+  // No notifications means there is no delivery rate to report (not "100%").
+  const deliveryRate = totalNotifications > 0 ? parseFloat(((deliveredCount / totalNotifications) * 100).toFixed(1)) : null;
 
   return successResponse(
     res,
@@ -76,7 +77,7 @@ const getOverview = asyncHandler(async (req, res) => {
         totalNotifications,
         successfulNotifications: deliveredCount,
         failedNotifications: failedCount,
-        deliveryRate: parseFloat(deliveryRate),
+        deliveryRate,
         apiRequests,
         errorCount: errorEvents,
       },

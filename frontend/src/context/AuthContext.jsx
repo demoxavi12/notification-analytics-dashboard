@@ -27,7 +27,6 @@ export const AuthProvider = ({ children }) => {
   // isLoading tracks only the initial session verification; login/register
   // submission state is owned by the pages so routes don't flash a spinner.
   const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState(null);
   // True after an explicit logout so the login page can confirm it; route guards
   // redirect before the caller could pass router state, so it lives here.
   const [signedOut, setSignedOut] = useState(false);
@@ -83,7 +82,6 @@ export const AuthProvider = ({ children }) => {
   }, []);
 
   const login = async (email, password) => {
-    setError(null);
     try {
       const res = await authApi.login({ email, password });
       const { user: loggedInUser, token: authToken } = extractSession(res);
@@ -97,13 +95,11 @@ export const AuthProvider = ({ children }) => {
       const msg = err.isAxiosError
         ? getApiErrorMessage(err, 'Login failed. Please check your credentials.')
         : err.message;
-      setError(msg);
       return { success: false, error: msg, status: err.response?.status, code: err.response?.data?.error?.code };
     }
   };
 
   const register = async ({ name, email, password }) => {
-    setError(null);
     try {
       // Explicit payload: public registration must never send a role, even if a
       // caller passes one in. The server assigns the default "user" role.
@@ -119,7 +115,6 @@ export const AuthProvider = ({ children }) => {
       const msg = err.isAxiosError
         ? getApiErrorMessage(err, 'Registration failed. Please try again.')
         : err.message;
-      setError(msg);
       return { success: false, error: msg, status: err.response?.status, code: err.response?.data?.error?.code };
     }
   };
@@ -143,7 +138,6 @@ export const AuthProvider = ({ children }) => {
     isAuthenticated: !!token && !!user,
     isAdmin: user?.role === 'admin',
     isLoading,
-    error,
     signedOut,
     login,
     register,

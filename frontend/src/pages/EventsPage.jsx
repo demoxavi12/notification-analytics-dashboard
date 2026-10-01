@@ -20,6 +20,7 @@ import Modal from '../components/common/Modal';
 import { EventCardList, EventsTable } from '../components/events/EventResults';
 import EventDetails from '../components/events/EventDetails';
 import IngestEventForm from '../components/events/IngestEventForm';
+import useDocumentTitle from '../hooks/useDocumentTitle';
 
 const SERVICE_OPTIONS = [
   { value: 'all', label: 'All services' },
@@ -40,6 +41,7 @@ const TableSkeleton = ({ rows }) => (
 );
 
 const EventsPage = () => {
+  useDocumentTitle('Events');
   const { filters, updateFilters, resetFilters, activeFilterCount } = useUrlFilters(EVENT_FILTER_SCHEMA);
   const query = usePaginatedQuery(fetchEvents, filters, 'Could not load events.');
   const isCompact = useMediaQuery('(max-width: 699.98px)');
