@@ -1,334 +1,216 @@
-import React, { useState, useEffect } from 'react';
-import {
-  Users,
-  Search,
-  Shield,
-  User,
-  ShieldAlert,
-  RefreshCw,
-  ChevronLeft,
-  ChevronRight,
-  CheckCircle,
-} from 'lucide-react';
-import { usersApi } from '../services/api';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { AlertTriangle, CheckCircle2, FilterX, RefreshCw } from 'lucide-react';
 import { useAuth } from '../context/useAuth';
-import Badge from '../components/common/Badge';
+import useUrlFilters from '../hooks/useUrlFilters';
+import usePaginatedQuery from '../hooks/usePaginatedQuery';
+import useMediaQuery from '../hooks/useMediaQuery';
+import { USER_FILTER_SCHEMA, USER_PAGE_SIZES, USER_ROLES, USER_STATUSES } from '../features/users/usersModel';
+import { changeUserRole, changeUserStatus, fetchUsers } from '../features/users/usersService';
+import SearchField from '../components/common/SearchField';
+import FilterSelect from '../components/common/FilterSelect';
+import Pagination from '../components/common/Pagination';
+import StateMessage from '../components/common/StateMessage';
+import Modal from '../components/common/Modal';
+import { UserCardList, UsersTable } from '../components/users/UserResults';
+import UserManagePanel from '../components/users/UserManagePanel';
+import useDocumentTitle from '../hooks/useDocumentTitle';
+
+// Admin-only page (AdminRoute + backend authorize('admin') on every /users call).
+// The backend is the security boundary; this page only offers actions it supports.
+
+const ROLE_OPTIONS = [
+  { value: 'all', label: 'All roles' },
+  ...Object.entries(USER_ROLES).map(([value, { label }]) => ({ value, label })),
+];
+
+const TableSkeleton = ({ rows }) => (
+  <div className="skeleton-list" aria-hidden="true">
+    {Array.from({ length: Math.min(rows, 10) }, (_, i) => (
+      <div key={i} className="skeleton skeleton-row" />
+    ))}
+  </div>
+);
 
 const UsersPage = () => {
-  const [users, setUsers] = useState([]);
-  const [pagination, setPagination] = useState({ page: 1, limit: 10, total: 0, totalPages: 1 });
-  const [search, setSearch] = useState('');
-  const [roleFilter, setRoleFilter] = useState('all');
-  const [isLoading, setIsLoading] = useState(true);
-  const [actionSuccess, setActionSuccess] = useState('');
-  const [actionError, setActionError] = useState('');
+  useDocumentTitle('Users');
+  const { user: currentUser } = useAuth();
+  const currentUserId = currentUser?._id ? String(currentUser._id) : null;
+  const { filters, updateFilters, resetFilters, activeFilterCount } = useUrlFilters(USER_FILTER_SCHEMA);
+  const query = usePaginatedQuery(fetchUsers, filters, 'Could not load users.');
+  const { updateData, reload } = query;
+  const isCompact = useMediaQuery('(max-width: 699.98px)');
 
-  const { user: currentAuthUser } = useAuth();
+  const [selected, setSelected] = useState(null);
+  const [notice, setNotice] = useState(null);
 
-  const fetchUsers = async (page = 1) => {
-    setIsLoading(true);
-    setActionError('');
-    try {
-      const res = await usersApi.getUsers({
-        page,
-        limit: pagination.limit,
-        search: search || undefined,
-        role: roleFilter !== 'all' ? roleFilter : undefined,
-      });
+  const items = query.data?.items;
+  const pagination = query.data?.pagination;
+  const hasData = Boolean(query.data);
 
-      setUsers(res.data.data || []);
-      setPagination(res.data.pagination);
-    } catch (err) {
-      console.error('Failed to fetch users:', err);
-      setActionError(err.response?.data?.error?.message || 'Failed to load user directory');
-    } finally {
-      setIsLoading(false);
-    }
-  };
+  // Keep the dialog showing the freshest copy of the selected user.
+  const selectedUser = useMemo(
+    () => (selected ? items?.find((u) => u.id === selected.id) || selected : null),
+    [selected, items]
+  );
 
+  const pageOutOfRange =
+    query.status === 'success' && pagination && pagination.total > 0 && items.length === 0 && pagination.page > pagination.totalPages;
+  const lastPage = pagination?.totalPages;
   useEffect(() => {
-    fetchUsers(1);
-  }, [roleFilter]);
+    if (pageOutOfRange) updateFilters({ page: lastPage });
+  }, [pageOutOfRange, lastPage, updateFilters]);
 
-  const handleSearchSubmit = (e) => {
-    e.preventDefault();
-    fetchUsers(1);
-  };
+  const applyUpdatedUser = useCallback(
+    (updated) => {
+      if (!updated) return;
+      setSelected(updated);
+      updateData((data) => ({ ...data, items: data.items.map((u) => (u.id === updated.id ? updated : u)) }));
+      // If the change moves the user out of the current role filter, refresh the list.
+      if (filters.role !== 'all' && updated.role !== filters.role) reload();
+    },
+    [updateData, reload, filters.role]
+  );
 
-  const handleRoleToggle = async (userId, currentRole) => {
-    const newRole = currentRole === 'admin' ? 'user' : 'admin';
-    setActionSuccess('');
-    setActionError('');
+  // Errors propagate to the panel, which shows them inside the dialog.
+  const handleChangeRole = useCallback(
+    async (user, role) => {
+      const updated = await changeUserRole(user.id, role);
+      applyUpdatedUser(updated || { ...user, role });
+      setNotice({ tone: 'success', text: `${user.name}’s role is now ${USER_ROLES[role].label}.` });
+    },
+    [applyUpdatedUser]
+  );
 
-    try {
-      await usersApi.updateRole(userId, newRole);
-      setUsers((prev) =>
-        prev.map((u) => (u._id === userId ? { ...u, role: newRole } : u))
-      );
-      setActionSuccess(`User role updated to ${newRole}`);
-      setTimeout(() => setActionSuccess(''), 4000);
-    } catch (err) {
-      setActionError(err.response?.data?.error?.message || 'Failed to update user role');
-    }
-  };
+  const handleChangeStatus = useCallback(
+    async (user, status) => {
+      const updated = await changeUserStatus(user.id, status);
+      applyUpdatedUser(updated || { ...user, status });
+      setNotice({ tone: 'success', text: `${user.name}’s status is now ${USER_STATUSES[status].label}.` });
+    },
+    [applyUpdatedUser]
+  );
 
-  const handleStatusToggle = async (userId, currentStatus) => {
-    const newStatus = currentStatus === 'active' ? 'suspended' : 'active';
-    setActionSuccess('');
-    setActionError('');
+  const closeDetails = useCallback(() => setSelected(null), []);
 
-    try {
-      await usersApi.updateStatus(userId, newStatus);
-      setUsers((prev) =>
-        prev.map((u) => (u._id === userId ? { ...u, status: newStatus } : u))
-      );
-      setActionSuccess(`User status updated to ${newStatus}`);
-      setTimeout(() => setActionSuccess(''), 4000);
-    } catch (err) {
-      setActionError(err.response?.data?.error?.message || 'Failed to update user status');
-    }
-  };
+  const resultsLabel = useMemo(() => {
+    const parts = [];
+    if (filters.q) parts.push(`matching “${filters.q}”`);
+    if (filters.role !== 'all') parts.push(`with role ${USER_ROLES[filters.role].label}`);
+    return parts.length ? `Users ${parts.join(', ')}` : 'All users';
+  }, [filters]);
+
+  let results;
+  if (query.status === 'loading' && !hasData) {
+    results = <TableSkeleton rows={Number(filters.limit)} />;
+  } else if (query.status === 'error') {
+    results = (
+      <StateMessage
+        tone="error"
+        announce
+        title="Couldn’t load users"
+        message={query.isNetworkError ? 'The API server is unreachable. Check that the backend is running, then retry.' : query.error}
+        onRetry={reload}
+      />
+    );
+  } else if (items.length === 0) {
+    results = (
+      <StateMessage
+        title={activeFilterCount ? 'No users match these filters' : 'No users yet'}
+        message={activeFilterCount ? 'Try a different name, email or role.' : 'Registered accounts will appear here.'}
+        action={
+          activeFilterCount ? (
+            <button type="button" className="btn btn-outline btn-sm" onClick={resetFilters}>
+              <FilterX size={14} aria-hidden="true" /> Clear filters
+            </button>
+          ) : null
+        }
+      />
+    );
+  } else {
+    results = isCompact ? (
+      <UserCardList users={items} currentUserId={currentUserId} onSelect={setSelected} label={resultsLabel} />
+    ) : (
+      <UsersTable users={items} currentUserId={currentUserId} onSelect={setSelected} caption={resultsLabel} />
+    );
+  }
 
   return (
-    <div>
-      {/* Header */}
+    <div className="list-page">
       <div className="page-header">
         <div>
-          <h1 className="page-title">User Administration (RBAC)</h1>
-          <p className="page-subtitle">
-            Manage organization members, permission tiers, and access credentials
-          </p>
+          <h1 className="page-title">User administration</h1>
+          <p className="page-subtitle">Accounts, roles and access status</p>
         </div>
-
-        <button
-          onClick={() => fetchUsers(pagination.page)}
-          className="btn btn-secondary btn-sm"
-        >
-          <RefreshCw size={14} className={isLoading ? 'loading-spinner' : ''} />
-          Refresh Directory
-        </button>
-      </div>
-
-      {actionSuccess && (
-        <div
-          style={{
-            padding: '12px 16px',
-            backgroundColor: 'var(--success-bg)',
-            color: 'var(--success)',
-            borderRadius: 'var(--radius-sm)',
-            marginBottom: '16px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-            fontSize: '13px',
-          }}
-        >
-          <CheckCircle size={16} />
-          <span>{actionSuccess}</span>
-        </div>
-      )}
-
-      {actionError && (
-        <div
-          style={{
-            padding: '12px 16px',
-            backgroundColor: 'var(--error-bg)',
-            color: 'var(--error)',
-            borderRadius: 'var(--radius-sm)',
-            marginBottom: '16px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-            fontSize: '13px',
-          }}
-        >
-          <ShieldAlert size={16} />
-          <span>{actionError}</span>
-        </div>
-      )}
-
-      {/* Filter and Search Bar */}
-      <div className="card" style={{ marginBottom: '20px', padding: '16px 20px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '16px' }}>
-          <form onSubmit={handleSearchSubmit} style={{ flex: 1, minWidth: '240px' }}>
-            <div style={{ position: 'relative' }}>
-              <input
-                type="text"
-                className="input"
-                style={{ width: '100%', paddingLeft: '36px' }}
-                placeholder="Search user by name or email..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-              />
-              <Search
-                size={16}
-                style={{
-                  position: 'absolute',
-                  left: '12px',
-                  top: '50%',
-                  transform: 'translateY(-50%)',
-                  color: 'var(--text-muted)',
-                }}
-              />
-            </div>
-          </form>
-
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>Filter by Role:</span>
-            <select
-              className="select"
-              value={roleFilter}
-              onChange={(e) => setRoleFilter(e.target.value)}
-            >
-              <option value="all">All Roles</option>
-              <option value="admin">Administrators Only</option>
-              <option value="user">Standard Users Only</option>
-            </select>
-          </div>
-        </div>
-      </div>
-
-      {/* Users Table */}
-      <div className="table-container">
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>User</th>
-              <th>Email</th>
-              <th>Role</th>
-              <th>Status</th>
-              <th>Joined Date</th>
-              <th style={{ textAlign: 'right' }}>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {isLoading ? (
-              <tr>
-                <td colSpan={6} style={{ textAlign: 'center', padding: '40px' }}>
-                  <div className="loading-spinner" />
-                </td>
-              </tr>
-            ) : users.length === 0 ? (
-              <tr>
-                <td colSpan={6} style={{ textAlign: 'center', padding: '40px', color: 'var(--text-secondary)' }}>
-                  No users found matching query.
-                </td>
-              </tr>
-            ) : (
-              users.map((u) => {
-                const isSelf = currentAuthUser?._id === u._id;
-                return (
-                  <tr key={u._id}>
-                    <td>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                        <div
-                          style={{
-                            width: '32px',
-                            height: '32px',
-                            borderRadius: '50%',
-                            backgroundColor: u.role === 'admin' ? 'var(--primary)' : '#6366f1',
-                            color: '#fff',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            fontWeight: 700,
-                            fontSize: '13px',
-                          }}
-                        >
-                          {u.name?.charAt(0).toUpperCase()}
-                        </div>
-                        <div>
-                          <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
-                            {u.name} {isSelf && <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>(You)</span>}
-                          </div>
-                          <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                            ID: {u._id}
-                          </div>
-                        </div>
-                      </div>
-                    </td>
-
-                    <td style={{ color: 'var(--text-secondary)' }}>
-                      {u.email}
-                    </td>
-
-                    <td>
-                      <Badge type={u.role === 'admin' ? 'info' : 'neutral'}>
-                        {u.role === 'admin' && <Shield size={11} />}
-                        {u.role}
-                      </Badge>
-                    </td>
-
-                    <td>
-                      <Badge type={u.status || 'active'}>{u.status || 'active'}</Badge>
-                    </td>
-
-                    <td style={{ color: 'var(--text-muted)', fontSize: '13px' }}>
-                      {new Date(u.createdAt).toLocaleDateString()}
-                    </td>
-
-                    <td style={{ textAlign: 'right' }}>
-                      <div style={{ display: 'inline-flex', gap: '6px' }}>
-                        <button
-                          onClick={() => handleRoleToggle(u._id, u.role)}
-                          disabled={isSelf}
-                          className="btn btn-outline btn-sm"
-                          title={isSelf ? 'Cannot change your own role' : `Switch to ${u.role === 'admin' ? 'user' : 'admin'}`}
-                        >
-                          {u.role === 'admin' ? 'Demote to User' : 'Make Admin'}
-                        </button>
-                        <button
-                          onClick={() => handleStatusToggle(u._id, u.status || 'active')}
-                          disabled={isSelf}
-                          className={`btn btn-sm ${u.status === 'suspended' ? 'btn-secondary' : 'btn-danger'}`}
-                          title={isSelf ? 'Cannot suspend your own account' : 'Toggle account status'}
-                        >
-                          {u.status === 'suspended' ? 'Reactivate' : 'Suspend'}
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })
-            )}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Pagination Controls */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          marginTop: '16px',
-          padding: '4px 8px',
-          fontSize: '13px',
-          color: 'var(--text-secondary)',
-        }}
-      >
-        <div>
-          Showing page <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{pagination.page}</span> of{' '}
-          <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{pagination.totalPages}</span> ({pagination.total} total members)
-        </div>
-
-        <div style={{ display: 'flex', gap: '8px' }}>
+        <div className="page-actions">
           <button
-            onClick={() => fetchUsers(pagination.page - 1)}
-            disabled={!pagination.hasPrevPage}
+            type="button"
+            onClick={reload}
             className="btn btn-secondary btn-sm"
+            disabled={query.status === 'loading'}
+            aria-label={query.status === 'loading' ? 'Refreshing users' : 'Refresh users'}
           >
-            <ChevronLeft size={16} /> Previous
-          </button>
-          <button
-            onClick={() => fetchUsers(pagination.page + 1)}
-            disabled={!pagination.hasNextPage}
-            className="btn btn-secondary btn-sm"
-          >
-            Next <ChevronRight size={16} />
+            <RefreshCw size={14} className={query.status === 'loading' ? 'spin' : undefined} aria-hidden="true" />
+            <span>Refresh</span>
           </button>
         </div>
       </div>
+
+      {notice && (
+        <div
+          className={`dashboard-notice dashboard-notice--${notice.tone === 'error' ? 'error' : 'success'}`}
+          role={notice.tone === 'error' ? 'alert' : 'status'}
+        >
+          {notice.tone === 'error' ? <AlertTriangle size={16} aria-hidden="true" /> : <CheckCircle2 size={16} aria-hidden="true" />}
+          <span>{notice.text}</span>
+          <button type="button" className="btn btn-outline btn-sm" onClick={() => setNotice(null)}>
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      <section className="card filter-bar" aria-label="User filters">
+        <SearchField
+          key={filters.q}
+          value={filters.q}
+          onSearch={(q) => updateFilters({ q })}
+          label="Search users by name or email"
+          placeholder="Search name or email…"
+        />
+        <div className="filter-fields">
+          <FilterSelect label="Role" value={filters.role} options={ROLE_OPTIONS} onChange={(role) => updateFilters({ role })} />
+          {activeFilterCount > 0 && (
+            <button type="button" className="btn btn-outline btn-sm filter-reset" onClick={resetFilters}>
+              <FilterX size={14} aria-hidden="true" /> Clear filters ({activeFilterCount})
+            </button>
+          )}
+        </div>
+      </section>
+
+      <section className="results-section" aria-label="User results" aria-busy={query.status === 'loading' || undefined}>
+        <div className={query.isRefreshing && query.status !== 'error' ? 'is-refreshing' : undefined}>{results}</div>
+        {hasData && query.status !== 'error' && items.length > 0 && (
+          <Pagination
+            pagination={pagination}
+            itemLabel="users"
+            onPageChange={(page) => updateFilters({ page })}
+            pageSizes={USER_PAGE_SIZES}
+            onPageSizeChange={(limit) => updateFilters({ limit: String(limit) })}
+            disabled={query.status === 'loading'}
+          />
+        )}
+      </section>
+
+      <Modal isOpen={Boolean(selectedUser)} onClose={closeDetails} title={selectedUser ? `Manage ${selectedUser.name}` : 'Manage user'} maxWidth="560px">
+        {selectedUser && (
+          <UserManagePanel
+            key={selectedUser.id}
+            user={selectedUser}
+            currentUserId={currentUserId}
+            onChangeRole={handleChangeRole}
+            onChangeStatus={handleChangeStatus}
+          />
+        )}
+      </Modal>
     </div>
   );
 };

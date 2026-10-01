@@ -11,6 +11,7 @@ import {
   validateName,
   validateNewPassword,
 } from "../utils/authValidation";
+import useDocumentTitle from "../hooks/useDocumentTitle";
 
 const EMPTY_ERRORS = { name: "", email: "", password: "" };
 
@@ -23,6 +24,7 @@ const iconStyle = {
 };
 
 const RegisterPage = () => {
+  useDocumentTitle("Create account");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");

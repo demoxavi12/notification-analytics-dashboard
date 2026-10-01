@@ -30,19 +30,21 @@ const INITIAL_RECENT_SECTIONS = { events: LOADING, notifications: LOADING };
 
 export const DEMO_MODE_AVAILABLE = import.meta.env.DEV;
 
-const useDashboardData = ({ isAdmin, onUnreadCountChange }) => {
+// `range` is controlled by the caller (the Dashboard keeps it in the URL, like Analytics).
+const useDashboardData = ({ isAdmin, onUnreadCountChange, range = DEFAULT_RANGE }) => {
   const [source, setSource] = useState(liveDashboardSource);
-  const [range, setRangeState] = useState(DEFAULT_RANGE);
   // Changing either key object re-runs the matching fetch effect.
-  const [rangeRequest, setRangeRequest] = useState({ range: DEFAULT_RANGE, nonce: 0 });
+  const [rangeRequest, setRangeRequest] = useState({ range, nonce: 0 });
   const [recentRequest, setRecentRequest] = useState({ nonce: 0 });
   const [rangeSections, setRangeSections] = useState(INITIAL_RANGE_SECTIONS);
   const [recentSections, setRecentSections] = useState(INITIAL_RECENT_SECTIONS);
-  const [loadedRange, setLoadedRange] = useState(DEFAULT_RANGE);
+  const [loadedRange, setLoadedRange] = useState(range);
   const [lastUpdated, setLastUpdated] = useState(null);
   const [simulation, setSimulation] = useState({ status: 'idle', message: '' });
   const [actionError, setActionError] = useState('');
   const simulatingRef = useRef(false);
+  // Synchronous guard: two clicks in the same tick would otherwise both send PATCH.
+  const markingIdsRef = useRef(new Set());
 
   // Range-scoped sections (KPIs, timeline, breakdowns).
   useEffect(() => {
@@ -75,15 +77,12 @@ const useDashboardData = ({ isAdmin, onUnreadCountChange }) => {
     };
   }, [source, recentRequest]);
 
-  const setRange = useCallback(
-    (nextRange) => {
-      if (nextRange === range) return;
-      setRangeState(nextRange);
-      setRangeSections(markAllLoading);
-      setRangeRequest({ range: nextRange, nonce: Date.now() });
-    },
-    [range]
-  );
+  // Range changed (URL/back button): mark range sections loading and request the new
+  // range. Adjusting state during render avoids an extra effect pass.
+  if (rangeRequest.range !== range) {
+    setRangeRequest({ range, nonce: rangeRequest.nonce + 1 });
+    setRangeSections(markAllLoading);
+  }
 
   const refresh = useCallback(() => {
     setRangeSections(markAllLoading);
@@ -112,6 +111,8 @@ const useDashboardData = ({ isAdmin, onUnreadCountChange }) => {
 
   const markNotificationRead = useCallback(
     async (id) => {
+      if (markingIdsRef.current.has(id)) return;
+      markingIdsRef.current.add(id);
       setActionError('');
       const setRead = (read) =>
         setRecentSections((prev) => ({
@@ -124,6 +125,7 @@ const useDashboardData = ({ isAdmin, onUnreadCountChange }) => {
 
       setRead(true); // optimistic
       const result = await source.markNotificationRead(id);
+      markingIdsRef.current.delete(id);
       if (!result.ok) {
         setRead(false);
         setActionError(result.error);
@@ -181,7 +183,6 @@ const useDashboardData = ({ isAdmin, onUnreadCountChange }) => {
   return {
     range,
     loadedRange,
-    setRange,
     refresh,
     isRefreshing,
     lastUpdated,

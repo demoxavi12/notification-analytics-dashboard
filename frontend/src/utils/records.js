@@ -44,17 +44,24 @@ export const normalizeNotificationList = (list) =>
   (Array.isArray(list) ? list.map(normalizeNotification) : []).filter((n) => n.id);
 
 // Pagination block from paginatedResponse(); tolerant of missing/partial data.
+// `fallback.itemCount` (rows actually returned) keeps the summary consistent with
+// what's on screen when the API omits pagination entirely.
 export const normalizePagination = (pagination, fallback = {}) => {
   const toInt = (value, dflt) => {
     const num = Number(value);
     return Number.isFinite(num) && num >= 0 ? Math.floor(num) : dflt;
   };
-  const limit = Math.max(toInt(pagination?.limit, fallback.limit ?? 10), 1);
-  const total = toInt(pagination?.total, 0);
-  const totalPages = Math.max(toInt(pagination?.totalPages, Math.ceil(total / limit)), 1);
+  const hasBlock = pagination !== null && typeof pagination === 'object';
+  const limit = Math.max(toInt(hasBlock ? pagination.limit : undefined, fallback.limit ?? 10), 1);
+  const requestedPage = Math.max(toInt(fallback.page, 1), 1);
+  const itemCount = toInt(fallback.itemCount, 0);
+  // Without a pagination block we only know about the rows we received.
+  const minimumTotal = itemCount > 0 ? (requestedPage - 1) * limit + itemCount : 0;
+  const total = Math.max(toInt(hasBlock ? pagination.total : undefined, 0), hasBlock ? 0 : minimumTotal);
+  const totalPages = Math.max(toInt(hasBlock ? pagination.totalPages : undefined, Math.ceil(total / limit)), 1);
   // Not clamped to totalPages: an out-of-range page (e.g. after deleting the last item
   // on the final page) must stay visible so the caller can move back a page.
-  const page = Math.max(toInt(pagination?.page, fallback.page ?? 1), 1);
+  const page = Math.max(toInt(hasBlock ? pagination.page : undefined, requestedPage), 1);
   return {
     page,
     limit,

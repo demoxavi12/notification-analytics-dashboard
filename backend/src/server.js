@@ -19,13 +19,22 @@ const app = require('./app');
 const { autoSeedIfEmpty } = require('./seed/autoSeed');
 
 // Connect Database; demo data is auto-seeded only in development (see seed/autoSeed.js).
-connectDB().then(async () => {
-  try {
-    await autoSeedIfEmpty();
-  } catch (err) {
-    console.warn(`[Auto-Seed] Notice: ${err.message}`);
-  }
-});
+// In production a database failure is fatal (no silent in-memory fallback).
+connectDB()
+  .then(async () => {
+    try {
+      await autoSeedIfEmpty();
+    } catch (err) {
+      console.warn(`[Auto-Seed] Notice: ${err.message}`);
+    }
+  })
+  .catch((err) => {
+    if (process.env.NODE_ENV === 'production') {
+      console.error(`[Startup] ${err.message}`);
+      process.exit(1);
+    }
+    console.error(`[MongoDB] Running without a database: ${err.message}`);
+  });
 
 const PORT = process.env.PORT || 5000;
 

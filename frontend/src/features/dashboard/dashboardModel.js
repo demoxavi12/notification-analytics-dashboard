@@ -1,5 +1,6 @@
-// Dashboard view model: turns raw API payloads (or demo payloads with the same
-// shape) into the plain objects the dashboard UI renders. The UI never reads API
+// Analytics view model shared by the Dashboard and Analytics pages (so both show the
+// same numbers for a range): turns raw API payloads (or demo payloads with the same
+// shape) into the plain objects the UI renders. The UI never reads API
 // responses directly, so the data source can change without touching components.
 
 export const DASHBOARD_RANGES = {
@@ -9,6 +10,11 @@ export const DASHBOARD_RANGES = {
 };
 
 export const DEFAULT_RANGE = '7d';
+
+// URL schema for the range control (shared shape with Analytics' filters).
+export const DASHBOARD_FILTER_SCHEMA = {
+  range: { default: DEFAULT_RANGE, values: Object.keys(DASHBOARD_RANGES) },
+};
 
 const toCount = (value) => {
   const num = Number(value);
@@ -120,4 +126,4 @@ export {
   normalizeNotification,
   normalizeEventList,
   normalizeNotificationList,
-} from '../../utils/records';
+} from '../../utils/records.js';

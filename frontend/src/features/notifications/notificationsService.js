@@ -35,9 +35,10 @@ export const fetchNotifications = async (filters, { signal } = {}) => {
   };
   const res = await notificationsApi.getNotifications(params, { signal });
   const unread = Number(res.data?.unreadCount);
+  const items = normalizeNotificationList(res.data?.data);
   return {
-    items: normalizeNotificationList(res.data?.data),
-    pagination: normalizePagination(res.data?.pagination, { page: filters.page, limit: params.limit }),
+    items,
+    pagination: normalizePagination(res.data?.pagination, { page: filters.page, limit: params.limit, itemCount: items.length }),
     // unreadCount is always the *current user's* unread total (not the filtered list).
     unreadCount: Number.isFinite(unread) ? unread : null,
   };

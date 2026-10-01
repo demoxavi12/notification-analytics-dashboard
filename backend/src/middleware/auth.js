@@ -45,6 +45,16 @@ const authenticate = async (req, res, next) => {
       );
     }
 
+    // Deactivated accounts lose access immediately, including existing sessions.
+    if (user.status === 'inactive') {
+      return errorResponse(
+        res,
+        'This account has been deactivated. Please contact an administrator.',
+        403,
+        'ACCOUNT_INACTIVE'
+      );
+    }
+
     // Attach user without password to request object
     const userObj = user.toJSON();
     req.user = userObj;

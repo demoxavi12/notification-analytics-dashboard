@@ -5,6 +5,7 @@ import { useAuth } from '../context/useAuth';
 import PasswordInput from '../components/common/PasswordInput';
 import { normalizeEmail, validateEmail } from '../utils/authValidation';
 import { getSafeRedirectPath, SESSION_END_REASONS } from '../utils/authSession';
+import useDocumentTitle from '../hooks/useDocumentTitle';
 
 const EMPTY_ERRORS = { email: '', password: '' };
 
@@ -27,6 +28,7 @@ const bannerStyle = {
 };
 
 const LoginPage = () => {
+  useDocumentTitle('Sign in');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -53,6 +55,8 @@ const LoginPage = () => {
   let sessionNotice = null;
   if (searchParams.get('suspended') === 'true') {
     sessionNotice = { tone: 'error', text: SESSION_END_REASONS.suspended };
+  } else if (searchParams.get('inactive') === 'true') {
+    sessionNotice = { tone: 'error', text: SESSION_END_REASONS.inactive };
   } else if (searchParams.get('expired') === 'true') {
     sessionNotice = { tone: 'warning', text: SESSION_END_REASONS.expired };
   } else if (signedOut) {

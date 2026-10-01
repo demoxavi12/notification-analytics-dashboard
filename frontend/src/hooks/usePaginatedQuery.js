@@ -8,7 +8,8 @@ import { getApiErrorMessage } from '../services/api';
 //  - loading is derived from "does the stored result match the current request",
 //    so no state is set synchronously inside the effect.
 //
-// fetcher must resolve to { items, pagination, meta? } or throw an axios error.
+// fetcher may resolve to any data shape (lists use { items, pagination }) or throw
+// an axios error. Despite the name it also serves non-paginated sections (Analytics).
 const usePaginatedQuery = (fetcher, params, fallbackMessage = 'Could not load data.') => {
   const key = JSON.stringify(params);
   const [nonce, setNonce] = useState(0);
