@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const { errorResponse } = require('../utils/apiResponse');
+const { getJwtSecret } = require('../config/jwt');
 
 // Authenticate user via JWT Bearer token
 const authenticate = async (req, res, next) => {
@@ -23,8 +24,7 @@ const authenticate = async (req, res, next) => {
   }
 
   try {
-    const jwtSecret = process.env.JWT_SECRET || 'super_secret_jwt_key_notification_saas_2025';
-    const decoded = jwt.verify(token, jwtSecret);
+    const decoded = jwt.verify(token, getJwtSecret());
 
     const user = await User.findById(decoded.id).select('+password');
     if (!user) {

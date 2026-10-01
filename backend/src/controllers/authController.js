@@ -4,17 +4,18 @@ const { logAuthEvent } = require('../services/eventService');
 const { successResponse, errorResponse } = require('../utils/apiResponse');
 const { asyncHandler } = require('../middleware/errorHandler');
 
-const generateToken = (userId) => {
-  const secret = process.env.JWT_SECRET || 'super_secret_jwt_key_notification_saas_2025';
-  const expiresIn = process.env.JWT_EXPIRES_IN || '7d';
-  return jwt.sign({ id: userId }, secret, { expiresIn });
-};
+const { getJwtSecret, getJwtExpiresIn } = require('../config/jwt');
+
+const generateToken = (userId) => jwt.sign({ id: userId }, getJwtSecret(), { expiresIn: getJwtExpiresIn() });
 
 // @desc Register new user
 // @route POST /api/auth/register
 // @access Public
 const register = asyncHandler(async (req, res) => {
-  const { name, email, password, role } = req.body;
+  // `role` (and any other field) from the request body is intentionally ignored:
+  // public registration can never choose a role. Admins are provisioned only via
+  // trusted paths (seed script, or an existing admin using PATCH /api/users/:id/role).
+  const { name, email, password } = req.body;
 
   if (!name || !email || !password) {
     return errorResponse(res, 'Name, email, and password are required', 400, 'MISSING_FIELDS');
@@ -26,14 +27,11 @@ const register = asyncHandler(async (req, res) => {
     return errorResponse(res, 'An account with this email address already exists', 400, 'USER_EXISTS');
   }
 
-  // Create user - prevent arbitrary admin escalation in public registration unless explicitly testing
-  const assignedRole = role === 'admin' && process.env.NODE_ENV === 'development' ? 'admin' : 'user';
-
   const user = await User.create({
     name,
     email: email.toLowerCase(),
     password,
-    role: assignedRole,
+    role: 'user',
   });
 
   const token = generateToken(user._id);

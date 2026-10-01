@@ -2,6 +2,7 @@ const Event = require('../models/Event');
 const { recordEvent } = require('../services/eventService');
 const { successResponse, errorResponse, paginatedResponse } = require('../utils/apiResponse');
 const { asyncHandler } = require('../middleware/errorHandler');
+const { queryString, escapeRegex } = require('../utils/queryInput');
 
 // @desc Ingest a new event
 // @route POST /api/events
@@ -35,47 +36,54 @@ const createEvent = asyncHandler(async (req, res) => {
   return successResponse(res, { event }, 'Event ingested successfully', 201);
 });
 
+// Visibility scope for event queries. Admins see every event; everyone else sees
+// only their own events plus unowned system events (userId: null). This must be
+// combined with other conditions via $and so no filter can widen it.
+const eventScopeFor = (user) =>
+  user.role === 'admin' ? {} : { $or: [{ userId: user._id }, { userId: null }] };
+
 // @desc Retrieve paginated & filtered events
 // @route GET /api/events
 // @access Private
 const getEvents = asyncHandler(async (req, res) => {
-  const page = parseInt(req.query.page, 10) || 1;
-  const limit = parseInt(req.query.limit, 10) || 15;
+  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 15, 1), 100);
   const skip = (page - 1) * limit;
 
-  const { service, status, eventType, search, startDate, endDate } = req.query;
+  const service = queryString(req.query.service);
+  const status = queryString(req.query.status);
+  const eventType = queryString(req.query.eventType);
+  const search = queryString(req.query.search);
+  const startDate = queryString(req.query.startDate, 40);
+  const endDate = queryString(req.query.endDate, 40);
 
-  const query = {};
+  // Role-based visibility is always the first condition; filters only narrow it.
+  const conditions = [eventScopeFor(req.user)];
 
-  // Role-based visibility: regular users see events related to them or general system events
-  if (req.user.role !== 'admin') {
-    query.$or = [{ userId: req.user._id }, { userId: null }];
-  }
-
-  if (service && service !== 'all') {
-    query.service = service;
-  }
-
-  if (status && status !== 'all') {
-    query.status = status;
-  }
-
-  if (eventType && eventType !== 'all') {
-    query.eventType = eventType;
-  }
+  if (service && service !== 'all') conditions.push({ service });
+  if (status && status !== 'all') conditions.push({ status });
+  if (eventType && eventType !== 'all') conditions.push({ eventType });
 
   if (search) {
-    query.$or = [
-      { eventType: { $regex: search, $options: 'i' } },
-      { source: { $regex: search, $options: 'i' } },
-    ];
+    const pattern = escapeRegex(search);
+    conditions.push({
+      $or: [
+        { eventType: { $regex: pattern, $options: 'i' } },
+        { source: { $regex: pattern, $options: 'i' } },
+      ],
+    });
   }
 
   if (startDate || endDate) {
-    query.timestamp = {};
-    if (startDate) query.timestamp.$gte = new Date(startDate);
-    if (endDate) query.timestamp.$lte = new Date(endDate);
+    const timestamp = {};
+    if (startDate) timestamp.$gte = new Date(startDate);
+    if (endDate) timestamp.$lte = new Date(endDate);
+    conditions.push({ timestamp });
   }
+
+  // The same scoped query drives both the page and the total count, so pagination
+  // totals never reveal events outside the caller's scope.
+  const query = { $and: conditions };
 
   const [events, total] = await Promise.all([
     Event.find(query)
@@ -93,14 +101,14 @@ const getEvents = asyncHandler(async (req, res) => {
 // @route GET /api/events/:id
 // @access Private
 const getEventById = asyncHandler(async (req, res) => {
-  const event = await Event.findById(req.params.id).populate('userId', 'name email role');
+  // Scope is part of the lookup itself: an event outside the caller's scope is
+  // indistinguishable from one that doesn't exist (no ID probing via 403 vs 404).
+  const event = await Event.findOne({ $and: [{ _id: req.params.id }, eventScopeFor(req.user)] }).populate(
+    'userId',
+    'name email role'
+  );
   if (!event) {
     return errorResponse(res, 'Event not found', 404, 'EVENT_NOT_FOUND');
-  }
-
-  // If not admin and event has a different userId, restrict access
-  if (req.user.role !== 'admin' && event.userId && event.userId._id.toString() !== req.user._id.toString()) {
-    return errorResponse(res, 'Access forbidden', 403, 'FORBIDDEN');
   }
 
   return successResponse(res, { event }, 'Event details retrieved');
@@ -110,10 +118,7 @@ const getEventById = asyncHandler(async (req, res) => {
 // @route GET /api/events/stats
 // @access Private
 const getEventStats = asyncHandler(async (req, res) => {
-  const filter = {};
-  if (req.user.role !== 'admin') {
-    filter.$or = [{ userId: req.user._id }, { userId: null }];
-  }
+  const filter = eventScopeFor(req.user);
 
   const [totalEvents, byStatus, byService] = await Promise.all([
     Event.countDocuments(filter),

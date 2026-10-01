@@ -2,6 +2,7 @@ const Notification = require('../models/Notification');
 const { sendNotification } = require('../services/notificationService');
 const { successResponse, errorResponse, paginatedResponse } = require('../utils/apiResponse');
 const { asyncHandler } = require('../middleware/errorHandler');
+const { queryString, escapeRegex } = require('../utils/queryInput');
 
 // @desc Create a new notification
 // @route POST /api/notifications
@@ -37,7 +38,8 @@ const getNotifications = asyncHandler(async (req, res) => {
   const limit = parseInt(req.query.limit, 10) || 10;
   const skip = (page - 1) * limit;
 
-  const { read, type, channel, status, search } = req.query;
+  const { read, type, channel, status } = req.query;
+  const search = queryString(req.query.search);
 
   const query = {};
 
@@ -65,9 +67,12 @@ const getNotifications = asyncHandler(async (req, res) => {
   }
 
   if (search) {
+    // Plain-text match (same approach as event search). Ownership scoping is set on
+    // query.recipient above and is unaffected by this $or.
+    const pattern = escapeRegex(search);
     query.$or = [
-      { title: { $regex: search, $options: 'i' } },
-      { message: { $regex: search, $options: 'i' } },
+      { title: { $regex: pattern, $options: 'i' } },
+      { message: { $regex: pattern, $options: 'i' } },
     ];
   }
 

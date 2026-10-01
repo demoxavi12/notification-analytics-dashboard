@@ -2,9 +2,17 @@ const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '../../.env') });
 const { connectDB } = require('../config/db');
 const { populateSeedData } = require('./seedData');
+const { isManualSeedAllowed } = require('./autoSeed');
 
 const seedDatabase = async () => {
   console.log('--- Starting Seed Script ---');
+
+  // Destructive (clears all collections) and creates accounts with published
+  // credentials, so never allowed against a production database.
+  if (!isManualSeedAllowed()) {
+    console.error('[Seed] Refusing to seed: NODE_ENV=production. Demo data is for local development only.');
+    process.exit(1);
+  }
 
   try {
     await connectDB();
