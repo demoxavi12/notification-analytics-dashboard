@@ -37,7 +37,7 @@ A production-style, full-stack SaaS platform that aggregates application events 
      - Service breakdown (Donut charts)
      - Top event types (Horizontal bar charts)
    - **Redis Caching**: Caches analytics and stats endpoints. Automatically invalidates cached results upon new event ingestion or notification dispatch.
-   - **Graceful Redis & MongoDB Fallback**: If Redis or external MongoDB is unavailable, the application gracefully activates in-memory fallbacks so development and demonstrations run smoothly without crashes.
+   - **Graceful Fallbacks**: If Redis is unavailable, caching falls back to memory. In **development only**, an unavailable MongoDB falls back to an embedded in-memory engine (data is not persisted); in production the server refuses to start without its database.
 
 5. **API Rate Limiting**
    - Sensitive endpoints (login/registration) restricted to 20 requests per 15 minutes.
@@ -56,7 +56,7 @@ A production-style, full-stack SaaS platform that aggregates application events 
 
 - **Frontend**: React 19, Vite, React Router v7, Axios, Recharts 3, Lucide Icons, Modern responsive CSS tokens.
 - **Backend**: Node.js, Express.js 5, MongoDB, Mongoose 9, Redis (ioredis), JSON Web Tokens (jsonwebtoken), bcryptjs, express-rate-limit, CORS, dotenv.
-- **Development**: Nodemon, embedded MongoDB in-memory engine fallback (`mongodb-memory-server`).
+- **Development**: Nodemon, embedded MongoDB in-memory engine fallback for local development only (`mongodb-memory-server`).
 
 ---
 
@@ -82,7 +82,7 @@ notification-analytics-dashboard/
 │   │   │   ├── NotificationsPage.jsx # Inbox, filters, mark read, dispatch modal
 │   │   │   ├── UsersPage.jsx       # Admin user management & RBAC role switcher
 │   │   │   ├── LoginPage.jsx       # Login screen with 1-click demo fill buttons
-│   │   │   ├── RegisterPage.jsx    # Registration with role selection
+│   │   │   ├── RegisterPage.jsx    # Public registration (always creates a standard user)
 │   │   │   └── NotFoundPage.jsx    # 404 page
 │   │   ├── services/
 │   │   │   └── api.js          # Centralized Axios client with JWT interceptors
@@ -96,7 +96,7 @@ notification-analytics-dashboard/
 ├── backend/
 │   ├── src/
 │   │   ├── config/
-│   │   │   ├── db.js           # Mongoose connection with embedded fallback
+│   │   │   ├── db.js           # Mongoose connection (dev-only embedded fallback)
 │   │   │   └── redis.js        # Redis client with in-memory fallback cache
 │   │   ├── controllers/
 │   │   │   ├── authController.js
@@ -128,7 +128,7 @@ notification-analytics-dashboard/
 │   │   │   └── seed.js         # CLI seed execution script
 │   │   ├── utils/
 │   │   │   └── apiResponse.js  # Standardized response formatters
-│   │   └── server.js           # Server bootstrap & auto-seeding
+│   │   └── server.js           # Server bootstrap (auto-seeds only in development)
 │   ├── .env.example
 │   ├── .env
 │   └── package.json
@@ -143,13 +143,13 @@ notification-analytics-dashboard/
 ### Prerequisites
 - Node.js (v18.x or v20+ recommended, tested on v22.19.0)
 - npm (v9+)
-- (Optional) Local MongoDB or Redis service. *Note: If not running, the application automatically uses embedded in-memory engines so it runs out-of-the-box without extra installations!*
+- (Optional) Local MongoDB or Redis service. *Note: in development, if they are not running, the backend uses embedded in-memory engines so it runs out-of-the-box. Production requires a real MongoDB.*
 
 ---
 
 ### Step 1: Clone or Navigate to Directory
 ```bash
-cd "c:/Users/swara/Desktop/Notifications And Analytics Dashboard/notification-analytics-dashboard"
+cd notification-analytics-dashboard
 ```
 
 ---
@@ -162,7 +162,9 @@ PORT=5000
 NODE_ENV=development
 MONGODB_URI=mongodb://localhost:27017/notification_dashboard
 REDIS_URL=redis://localhost:6379
-JWT_SECRET=super_secret_jwt_key_notification_saas_2025
+# Required: at least 32 random characters. Generate with:
+#   node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
+JWT_SECRET=replace-with-a-long-random-secret
 JWT_EXPIRES_IN=7d
 CLIENT_URL=http://localhost:5173
 AUTH_RATE_LIMIT_WINDOW_MS=60000
@@ -174,7 +176,7 @@ AUTH_RATE_LIMIT_MAX=100
 VITE_API_URL=http://localhost:5000/api
 ```
 
-*(Pre-configured `.env` and `.env.example` files are already present in both folders!)*
+*Copy `backend/.env.example` to `backend/.env` and `frontend/.env.example` to `frontend/.env`, then fill in real values. `.env` files are git-ignored and must never be committed. In production the backend refuses to start without a strong `JWT_SECRET`, and `CLIENT_URL` must list the frontend origin(s) (comma-separated) for CORS. If `VITE_API_URL` is unset, production frontend builds call `/api` on the same origin.*
 
 ---
 
@@ -196,7 +198,7 @@ npm install
 
 ### Step 4: Populate Seed Data
 
-Run the seed command in the `backend/` directory:
+For **local development only** (the script clears all collections and is refused when `NODE_ENV=production`), run the seed command in the `backend/` directory:
 ```bash
 cd backend
 npm run seed
@@ -228,7 +230,9 @@ npm run dev
 
 ---
 
-## 🔑 Demo Credentials
+## 🔑 Demo Credentials (local development only)
+
+These accounts exist only in a locally seeded development database. They are never seeded in production, and the demo login buttons are compiled out of production builds unless `VITE_ENABLE_DEMO_LOGIN=true` is set at build time.
 
 | Role | Email | Password | Permissions |
 | :--- | :--- | :--- | :--- |
@@ -254,7 +258,7 @@ npm run dev
 - `GET /api/users` — Paginated user directory with search and role filters.
 - `GET /api/users/:id` — Retrieve individual user details.
 - `PATCH /api/users/:id/role` — Modify user role (`admin` or `user`).
-- `PATCH /api/users/:id/status` — Toggle user status (`active`, `inactive`, `suspended`).
+- `PATCH /api/users/:id/status` — Set user status: `active`, `inactive` (deactivated) or `suspended`. Both `inactive` and `suspended` block sign-in and end existing sessions.
 
 ### Events Engine (`/api/events`)
 - `POST /api/events` — Ingest new application event (Rate limited).
@@ -294,4 +298,4 @@ npm run dev
    - Provide a persistent MongoDB URI (e.g., MongoDB Atlas `mongodb+srv://...`).
    - Provide a managed Redis URL (e.g., Upstash or Redis Cloud `rediss://...`).
    - Configure environment variables: `PORT`, `MONGODB_URI`, `REDIS_URL`, `JWT_SECRET`, and `CLIENT_URL`.
-   - Run `npm run seed` once in staging or production to initialize demo data.
+   - Use a strong, unique `JWT_SECRET` and never run `npm run seed` against staging or production (it clears all data and is refused when `NODE_ENV=production`). Create the first admin through a trusted path (e.g. promote an existing account directly in the database), since public registration can never create admins.
