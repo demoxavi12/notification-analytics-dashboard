@@ -13,7 +13,7 @@ try {
 }
 
 const { connectDB } = require('./config/db');
-const { redisClient } = require('./config/redis');
+const { initRedis, closeRedis } = require('./config/redis');
 const app = require('./app');
 
 const { autoSeedIfEmpty } = require('./seed/autoSeed');
@@ -36,6 +36,9 @@ connectDB()
     console.error(`[MongoDB] Running without a database: ${err.message}`);
   });
 
+// One shared Redis client for the process (optional cache; see config/redis.js).
+initRedis();
+
 const PORT = process.env.PORT || 5000;
 
 const server = app.listen(PORT, () => {
@@ -46,13 +49,16 @@ const server = app.listen(PORT, () => {
 });
 
 // Handle graceful shutdown
+let shuttingDown = false;
 const gracefulShutdown = () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
   console.log('\nReceived kill signal, shutting down gracefully...');
-  server.close(() => {
+  // Don't hang forever on lingering keep-alive connections.
+  setTimeout(() => process.exit(1), 10000).unref();
+  server.close(async () => {
     console.log('Closed remaining connections.');
-    if (redisClient) {
-      redisClient.disconnect();
-    }
+    await closeRedis();
     process.exit(0);
   });
 };

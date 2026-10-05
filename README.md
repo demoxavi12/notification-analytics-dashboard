@@ -36,12 +36,13 @@ A production-style, full-stack SaaS platform that aggregates application events 
      - Delivery trends (Line charts)
      - Service breakdown (Donut charts)
      - Top event types (Horizontal bar charts)
-   - **Redis Caching**: Caches analytics and stats endpoints. Automatically invalidates cached results upon new event ingestion or notification dispatch.
-   - **Graceful Fallbacks**: If Redis is unavailable, caching falls back to memory. In **development only**, an unavailable MongoDB falls back to an embedded in-memory engine (data is not persisted); in production the server refuses to start without its database.
+   - **Redis Caching**: Caches analytics and stats endpoints per authorization scope (each user's own view; one shared admin view). Event ingestion, notification dispatch, mark-read/mark-all-read, deletion and role changes invalidate exactly the affected users' entries and the admin view (prefix `SCAN` + `UNLINK`, never `KEYS`). TTLs (60s analytics, 30s stats) are only a backstop.
+   - **Graceful Fallbacks**: If Redis is unavailable or not configured, caching falls back to a bounded per-process memory cache and the client keeps reconnecting in the background; `/api/health` reports `redis` and `cache` status without failing the health check. In **development only**, an unavailable MongoDB falls back to an embedded in-memory engine (data is not persisted); in production the server refuses to start without its database.
 
 5. **API Rate Limiting**
    - Sensitive endpoints (login/registration) restricted to 20 requests per 15 minutes.
-   - Event ingestion limited to 150 requests per minute.
+   - Event writes (ingestion and simulation) limited to 150 requests per minute.
+   - Limits are per client IP and kept in process memory (per server instance; they do not depend on Redis). Behind a reverse proxy set `TRUST_PROXY` to the number of proxy hops so the real client IP is used.
    - Returns standard `HTTP 429 Too Many Requests` with retry headers and JSON error details.
 
 6. **Modern SaaS User Interface**
@@ -97,7 +98,8 @@ notification-analytics-dashboard/
 │   ├── src/
 │   │   ├── config/
 │   │   │   ├── db.js           # Mongoose connection (dev-only embedded fallback)
-│   │   │   └── redis.js        # Redis client with in-memory fallback cache
+│   │   │   ├── proxy.js        # TRUST_PROXY parsing for client-IP resolution
+│   │   │   └── redis.js        # Shared Redis client (optional; reconnects, redacted logs)
 │   │   ├── controllers/
 │   │   │   ├── authController.js
 │   │   │   ├── userController.js
@@ -107,7 +109,7 @@ notification-analytics-dashboard/
 │   │   ├── middleware/
 │   │   │   ├── auth.js         # authenticate & authorize RBAC middleware
 │   │   │   ├── rateLimiter.js  # express-rate-limit configurations
-│   │   │   ├── cache.js        # Redis cache middleware & invalidation logic
+│   │   │   ├── cache.js        # Scoped response cache, memory fallback & invalidation
 │   │   │   └── errorHandler.js # Centralized async error handler
 │   │   ├── models/
 │   │   │   ├── User.js         # User model with bcrypt pre-save hashing
@@ -169,6 +171,7 @@ JWT_EXPIRES_IN=7d
 CLIENT_URL=http://localhost:5173
 AUTH_RATE_LIMIT_WINDOW_MS=60000
 AUTH_RATE_LIMIT_MAX=100
+# TRUST_PROXY=1   # only when running behind a reverse proxy / load balancer
 ```
 
 #### Frontend (`frontend/.env`):
@@ -245,8 +248,10 @@ These accounts exist only in a locally seeded development database. They are nev
 
 ## 📡 REST API Reference
 
+**Input rules (all endpoints):** JSON bodies are limited to 100 KB (`413 PAYLOAD_TOO_LARGE`; malformed JSON → `400 INVALID_JSON`). List endpoints take `page`/`limit` as positive integers: invalid values fall back to defaults, `limit` is capped at 100 and `page` at 10,000. Searches are plain text (regex characters match literally, input capped at 100 characters). Malformed ids return `400 INVALID_ID_FORMAT`. Unexpected server errors return a generic `500 SERVER_ERROR` without internal details.
+
 ### Health Check
-- `GET /api/health` — Returns system status, DB connection status, Redis status, and uptime.
+- `GET /api/health` — Returns overall status (follows MongoDB; `503` when the database is down), `database`, `redis` (`connected` / `disconnected` / `disabled`), `cache` (`redis` / `memory`) and uptime. A Redis outage never fails the health check.
 
 ### Authentication (`/api/auth`)
 - `POST /api/auth/register` — Register new user account.
@@ -261,14 +266,14 @@ These accounts exist only in a locally seeded development database. They are nev
 - `PATCH /api/users/:id/status` — Set user status: `active`, `inactive` (deactivated) or `suspended`. Both `inactive` and `suspended` block sign-in and end existing sessions.
 
 ### Events Engine (`/api/events`)
-- `POST /api/events` — Ingest new application event (Rate limited).
+- `POST /api/events` — Ingest new application event (Rate limited). `eventType`/`source` up to 100 characters; `metadata` is any JSON object up to 16 KB and 5 levels deep (keys may not start with `$` or contain `.`). Users can only ingest events for themselves; admins may set `userId` to any existing user or `null` for a system event.
 - `GET /api/events` — Paginated event stream (Filters: `service`, `status`, `eventType`, `search`, date range).
 - `GET /api/events/:id` — Retrieve full event payload and metadata.
 - `GET /api/events/stats` — Quick status & service volume statistics (Cached).
-- `POST /api/events/simulate` — Trigger instant service event simulation for testing.
+- `POST /api/events/simulate` — Trigger instant service event simulation for testing (Rate limited). Simulated events belong to the caller; only an admin's `system` simulation creates an unowned system event visible to all users.
 
 ### Notifications Center (`/api/notifications`)
-- `POST /api/notifications` — Dispatch new notification (Auto-emits event).
+- `POST /api/notifications` — Dispatch new notification (Auto-emits event, rate limited). Users can only notify themselves and cannot set the delivery `status`; admins may set `recipient` to any existing user and set `status`.
 - `GET /api/notifications` — Retrieve notifications with filters (`read`, `type`, `channel`, `status`).
 - `PATCH /api/notifications/:id/read` — Mark single notification as read.
 - `PATCH /api/notifications/read-all` — Mark all user notifications as read.
@@ -276,6 +281,7 @@ These accounts exist only in a locally seeded development database. They are nev
 - `DELETE /api/notifications/:id` — Remove notification.
 
 ### Analytics (`/api/analytics`) — Redis Cached
+`range` must be `24h`, `7d` or `30d` and `service` one of the event services (or `all`); other values return `400 INVALID_QUERY`.
 - `GET /api/analytics/overview?range=7d` — KPI aggregates (total events, users, delivery rates, errors, API requests).
 - `GET /api/analytics/timeseries?range=7d` — Chronological timeline buckets for charts.
 - `GET /api/analytics/distributions?range=7d` — Service shares, event type breakdown, and delivery channels.
@@ -296,6 +302,6 @@ These accounts exist only in a locally seeded development database. They are nev
 
 3. **Cloud Deployment (e.g. Render / Railway / AWS / Docker)**:
    - Provide a persistent MongoDB URI (e.g., MongoDB Atlas `mongodb+srv://...`).
-   - Provide a managed Redis URL (e.g., Upstash or Redis Cloud `rediss://...`).
-   - Configure environment variables: `PORT`, `MONGODB_URI`, `REDIS_URL`, `JWT_SECRET`, and `CLIENT_URL`.
+   - Provide a managed Redis URL (e.g., Upstash or Redis Cloud `rediss://...`). In production Redis is used only when `REDIS_URL` is set; otherwise the server logs a warning and caches per process.
+   - Configure environment variables: `PORT`, `MONGODB_URI`, `REDIS_URL`, `JWT_SECRET`, `CLIENT_URL`, and `TRUST_PROXY` when behind a proxy.
    - Use a strong, unique `JWT_SECRET` and never run `npm run seed` against staging or production (it clears all data and is refused when `NODE_ENV=production`). Create the first admin through a trusted path (e.g. promote an existing account directly in the database), since public registration can never create admins.

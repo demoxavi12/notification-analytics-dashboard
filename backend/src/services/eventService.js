@@ -1,5 +1,5 @@
 const Event = require('../models/Event');
-const { invalidateAnalyticsCache } = require('../middleware/cache');
+const { invalidateCacheFor } = require('../middleware/cache');
 
 /**
  * Event recording service that acts as the ingestion pipeline
@@ -23,10 +23,9 @@ const recordEvent = async ({
     timestamp,
   });
 
-  // Invalidate cached analytics results asynchronously
-  invalidateAnalyticsCache().catch((err) => {
-    console.warn(`[EventService] Cache invalidation warning: ${err.message}`);
-  });
+  // A user's event changes their own scope (plus the admin view); an unowned system
+  // event is visible to everyone. Awaited so an immediate refetch is never stale.
+  await invalidateCacheFor(userId ? { userIds: [userId] } : { allUsers: true });
 
   return event;
 };

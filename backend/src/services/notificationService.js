@@ -1,6 +1,5 @@
 const Notification = require('../models/Notification');
 const { logNotificationEvent } = require('./eventService');
-const { invalidateAnalyticsCache } = require('../middleware/cache');
 
 /**
  * Notification service handling delivery tracking and event emission
@@ -34,9 +33,8 @@ const sendNotification = async ({
     type,
     title,
   }, eventStatus);
-
-  // Invalidate cache
-  invalidateAnalyticsCache().catch(() => {});
+  // logNotificationEvent -> recordEvent already invalidated the recipient's and the
+  // admin cache scopes after the notification was stored.
 
   return notification;
 };

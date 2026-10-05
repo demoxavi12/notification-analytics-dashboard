@@ -1,30 +1,76 @@
 const Notification = require('../models/Notification');
 const { sendNotification } = require('../services/notificationService');
+const { invalidateCacheFor } = require('../middleware/cache');
 const { successResponse, errorResponse, paginatedResponse } = require('../utils/apiResponse');
 const { asyncHandler } = require('../middleware/errorHandler');
-const { queryString, escapeRegex } = require('../utils/queryInput');
+const {
+  queryString,
+  escapeRegex,
+  parsePagination,
+  isObjectId,
+  stringField,
+  metadataField,
+} = require('../utils/queryInput');
+
+const NOTIFICATION_TYPES = ['info', 'success', 'warning', 'error'];
+const NOTIFICATION_CHANNELS = ['email', 'push', 'in-app'];
+const DELIVERY_STATUSES = ['pending', 'delivered', 'failed'];
+const MESSAGE_MAX_LENGTH = 2000;
+
+// Optional enum field: undefined passes (caller applies the default).
+const enumError = (value, allowed, field) =>
+  value !== undefined && !allowed.includes(value) ? `Invalid ${field}. Must be one of: ${allowed.join(', ')}` : null;
+const { resolveTargetUser } = require('../utils/targetUser');
 
 // @desc Create a new notification
 // @route POST /api/notifications
-// @access Private (Admin or internal service)
+// @access Private. Non-admins may only notify themselves (the "test notification"
+//         flow) and cannot set the delivery status; admins may dispatch to any
+//         existing user with any status.
 const createNotification = asyncHandler(async (req, res) => {
-  const { recipient, title, message, type, channel, status, metadata } = req.body;
+  const { recipient, type, channel, status } = req.body;
 
-  if (!title || !message) {
+  if (!req.body.title || !req.body.message) {
     return errorResponse(res, 'Title and message are required', 400, 'MISSING_FIELDS');
   }
 
-  // Recipient defaults to the requesting user if not provided
-  const targetRecipient = recipient || req.user._id;
+  const title = stringField(req.body.title, { field: 'title', max: 200, required: true });
+  const message = stringField(req.body.message, { field: 'message', max: MESSAGE_MAX_LENGTH, required: true });
+  const metadata = metadataField(req.body.metadata);
+  const invalid =
+    title.error ||
+    message.error ||
+    metadata.error ||
+    enumError(type, NOTIFICATION_TYPES, 'type') ||
+    enumError(channel, NOTIFICATION_CHANNELS, 'channel');
+  if (invalid) {
+    return errorResponse(res, invalid, 400, 'VALIDATION_ERROR');
+  }
+
+  // Delivery status is an outcome recorded by the system, not user input: a forged
+  // "failed"/"pending" would distort delivery metrics (including the admin view).
+  if (status !== undefined && req.user.role !== 'admin') {
+    return errorResponse(res, 'Only administrators can set a notification delivery status', 403, 'FORBIDDEN_FIELD');
+  }
+  const statusError = enumError(status, DELIVERY_STATUSES, 'status');
+  if (statusError) {
+    return errorResponse(res, statusError, 400, 'VALIDATION_ERROR');
+  }
+
+  // Recipient defaults to the requesting user if not provided.
+  const target = await resolveTargetUser(req, recipient, { field: 'recipient' });
+  if (target.error) {
+    return errorResponse(res, target.error.message, target.error.status, target.error.code);
+  }
 
   const notification = await sendNotification({
-    recipient: targetRecipient,
-    title,
-    message,
+    recipient: target.userId,
+    title: title.value,
+    message: message.value,
     type: type || 'info',
     channel: channel || 'in-app',
     status: status || 'delivered',
-    metadata: metadata || {},
+    metadata: metadata.value,
   });
 
   return successResponse(res, { notification }, 'Notification created successfully', 201);
@@ -34,11 +80,13 @@ const createNotification = asyncHandler(async (req, res) => {
 // @route GET /api/notifications
 // @access Private
 const getNotifications = asyncHandler(async (req, res) => {
-  const page = parseInt(req.query.page, 10) || 1;
-  const limit = parseInt(req.query.limit, 10) || 10;
-  const skip = (page - 1) * limit;
+  const { page, limit, skip } = parsePagination(req.query);
 
-  const { read, type, channel, status } = req.query;
+  // Strings only: arrays/objects in filters are ignored rather than becoming $in/operators.
+  const read = queryString(req.query.read);
+  const type = queryString(req.query.type);
+  const channel = queryString(req.query.channel);
+  const status = queryString(req.query.status);
   const search = queryString(req.query.search);
 
   const query = {};
@@ -46,11 +94,14 @@ const getNotifications = asyncHandler(async (req, res) => {
   // Regular users only see their own notifications
   if (req.user.role !== 'admin' || req.query.selfOnly === 'true') {
     query.recipient = req.user._id;
-  } else if (req.query.recipient) {
+  } else if (req.query.recipient !== undefined) {
+    if (!isObjectId(req.query.recipient)) {
+      return errorResponse(res, 'Invalid format for field: recipient', 400, 'INVALID_ID_FORMAT');
+    }
     query.recipient = req.query.recipient;
   }
 
-  if (read !== undefined && read !== 'all') {
+  if (read && read !== 'all') {
     query.read = read === 'true';
   }
 
@@ -128,6 +179,8 @@ const markAsRead = asyncHandler(async (req, res) => {
     return errorResponse(res, 'Notification not found or unauthorized', 404, 'NOT_FOUND');
   }
 
+  await invalidateCacheFor({ userIds: [notification.recipient] });
+
   const unreadCount = await Notification.countDocuments({
     recipient: req.user._id,
     read: false,
@@ -144,6 +197,10 @@ const markAllAsRead = asyncHandler(async (req, res) => {
     { recipient: req.user._id, read: false },
     { $set: { read: true } }
   );
+
+  if (result.modifiedCount > 0) {
+    await invalidateCacheFor({ userIds: [req.user._id] });
+  }
 
   return successResponse(
     res,
@@ -206,6 +263,8 @@ const deleteNotification = asyncHandler(async (req, res) => {
   if (!notification) {
     return errorResponse(res, 'Notification not found or unauthorized', 404, 'NOT_FOUND');
   }
+
+  await invalidateCacheFor({ userIds: [notification.recipient] });
 
   return successResponse(res, null, 'Notification deleted successfully');
 });

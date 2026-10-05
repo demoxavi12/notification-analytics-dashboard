@@ -9,13 +9,13 @@ const {
 } = require('../controllers/eventController');
 const { authenticate } = require('../middleware/auth');
 const { eventIngestLimiter } = require('../middleware/rateLimiter');
-const { cacheMiddleware } = require('../middleware/cache');
+const { cacheMiddleware, CACHE_TTL_SECONDS } = require('../middleware/cache');
 
 router.use(authenticate);
 
 router.post('/', eventIngestLimiter, createEvent);
-router.post('/simulate', simulateServiceEvent);
-router.get('/stats', cacheMiddleware(30, 'stats:events'), getEventStats);
+router.post('/simulate', eventIngestLimiter, simulateServiceEvent);
+router.get('/stats', cacheMiddleware({ resource: 'events:stats', ttlSeconds: CACHE_TTL_SECONDS.stats }), getEventStats);
 router.get('/', getEvents);
 router.get('/:id', getEventById);
 

@@ -2,16 +2,33 @@ const Event = require('../models/Event');
 const { recordEvent } = require('../services/eventService');
 const { successResponse, errorResponse, paginatedResponse } = require('../utils/apiResponse');
 const { asyncHandler } = require('../middleware/errorHandler');
-const { queryString, escapeRegex } = require('../utils/queryInput');
+const { queryString, escapeRegex, parsePagination, stringField, metadataField } = require('../utils/queryInput');
+const { resolveTargetUser } = require('../utils/targetUser');
 
 // @desc Ingest a new event
 // @route POST /api/events
-// @access Private (authenticated or API service key)
-const createEvent = asyncHandler(async (req, res) => {
-  const { eventType, source, service, metadata, status, userId } = req.body;
+// @access Private. Non-admins may only ingest events for themselves; admins may
+//         attribute an event to any existing user, or pass userId: null for a system event.
+const VALID_STATUSES = ['success', 'warning', 'error', 'info'];
 
-  if (!eventType || !service) {
+const createEvent = asyncHandler(async (req, res) => {
+  const { service, status, userId } = req.body;
+
+  if (!req.body.eventType || !service) {
     return errorResponse(res, 'eventType and service are required fields', 400, 'MISSING_FIELDS');
+  }
+
+  // Explicit types and bounds: objects/arrays never reach Mongoose casting, and no
+  // field can carry an unbounded payload.
+  const eventType = stringField(req.body.eventType, { field: 'eventType', max: 100, required: true });
+  const source = stringField(req.body.source, { field: 'source', max: 100 });
+  const metadata = metadataField(req.body.metadata);
+  const invalid = eventType.error || source.error || metadata.error;
+  if (invalid) {
+    return errorResponse(res, invalid, 400, 'VALIDATION_ERROR');
+  }
+  if (status !== undefined && !VALID_STATUSES.includes(status)) {
+    return errorResponse(res, `Invalid status. Must be one of: ${VALID_STATUSES.join(', ')}`, 400, 'INVALID_STATUS');
   }
 
   const validServices = ['auth-service', 'notification-service', 'payment-service', 'api-gateway', 'system'];
@@ -24,12 +41,17 @@ const createEvent = asyncHandler(async (req, res) => {
     );
   }
 
+  const target = await resolveTargetUser(req, userId, { field: 'userId', allowNull: true });
+  if (target.error) {
+    return errorResponse(res, target.error.message, target.error.status, target.error.code);
+  }
+
   const event = await recordEvent({
-    eventType,
-    source: source || 'api',
-    userId: userId || (req.user ? req.user._id : null),
+    eventType: eventType.value,
+    source: source.value || 'api',
+    userId: target.userId,
     service,
-    metadata: metadata || {},
+    metadata: metadata.value,
     status: status || 'info',
   });
 
@@ -46,9 +68,7 @@ const eventScopeFor = (user) =>
 // @route GET /api/events
 // @access Private
 const getEvents = asyncHandler(async (req, res) => {
-  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
-  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 15, 1), 100);
-  const skip = (page - 1) * limit;
+  const { page, limit, skip } = parsePagination(req.query, { defaultLimit: 15 });
 
   const service = queryString(req.query.service);
   const status = queryString(req.query.status);
@@ -76,8 +96,13 @@ const getEvents = asyncHandler(async (req, res) => {
 
   if (startDate || endDate) {
     const timestamp = {};
-    if (startDate) timestamp.$gte = new Date(startDate);
-    if (endDate) timestamp.$lte = new Date(endDate);
+    const from = startDate ? new Date(startDate) : null;
+    const to = endDate ? new Date(endDate) : null;
+    if ((from && Number.isNaN(from.getTime())) || (to && Number.isNaN(to.getTime()))) {
+      return errorResponse(res, 'startDate and endDate must be valid dates', 400, 'INVALID_DATE');
+    }
+    if (from) timestamp.$gte = from;
+    if (to) timestamp.$lte = to;
     conditions.push({ timestamp });
   }
 
@@ -145,7 +170,8 @@ const getEventStats = asyncHandler(async (req, res) => {
 
 // @desc Simulate events from backend services
 // @route POST /api/events/simulate
-// @access Private
+// @access Private. Simulated events belong to the caller; only an admin's "system"
+//         simulation creates an unowned (globally visible) system event.
 const simulateServiceEvent = asyncHandler(async (req, res) => {
   const { serviceType } = req.body; // 'auth', 'payment', 'notification', 'system'
 
@@ -192,6 +218,9 @@ const simulateServiceEvent = asyncHandler(async (req, res) => {
         eventType: 'system.error',
         service: 'system',
         source: 'worker-node-1',
+        // Unowned events are shown to every user, so only admins may create them;
+        // a non-admin's simulation stays in their own scope.
+        userId: req.user.role === 'admin' ? null : userId,
         status: 'error',
         metadata: {
           errorCode: 'ERR_HIGH_MEMORY_PRESSURE',

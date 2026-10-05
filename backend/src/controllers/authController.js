@@ -6,7 +6,15 @@ const { asyncHandler } = require('../middleware/errorHandler');
 
 const { getJwtSecret, getJwtExpiresIn } = require('../config/jwt');
 
-const generateToken = (userId) => jwt.sign({ id: userId }, getJwtSecret(), { expiresIn: getJwtExpiresIn() });
+const { EMAIL_PATTERN, EMAIL_MAX_LENGTH } = User;
+const NAME_MAX_LENGTH = 100;
+const PASSWORD_MAX_LENGTH = 128; // matches the registration form
+const LOGIN_PASSWORD_MAX_LENGTH = 1024; // bound hashing work without locking out older accounts
+
+const isNonEmptyString = (value) => typeof value === 'string' && value.trim().length > 0;
+
+const generateToken = (userId) =>
+  jwt.sign({ id: userId }, getJwtSecret(), { algorithm: 'HS256', expiresIn: getJwtExpiresIn() });
 
 // @desc Register new user
 // @route POST /api/auth/register
@@ -15,21 +23,34 @@ const register = asyncHandler(async (req, res) => {
   // `role` (and any other field) from the request body is intentionally ignored:
   // public registration can never choose a role. Admins are provisioned only via
   // trusted paths (seed script, or an existing admin using PATCH /api/users/:id/role).
-  const { name, email, password } = req.body;
+  const { name, password } = req.body;
 
-  if (!name || !email || !password) {
+  if (!isNonEmptyString(name) || !isNonEmptyString(req.body.email) || !isNonEmptyString(password)) {
     return errorResponse(res, 'Name, email, and password are required', 400, 'MISSING_FIELDS');
   }
 
+  // Validate before any query or hashing work: strings only (no operator objects),
+  // bounded lengths, and a linear-time email check.
+  const email = req.body.email.trim().toLowerCase();
+  if (email.length > EMAIL_MAX_LENGTH || !EMAIL_PATTERN.test(email)) {
+    return errorResponse(res, 'Please provide a valid email address', 400, 'VALIDATION_ERROR');
+  }
+  if (name.trim().length > NAME_MAX_LENGTH) {
+    return errorResponse(res, `Name cannot exceed ${NAME_MAX_LENGTH} characters`, 400, 'VALIDATION_ERROR');
+  }
+  if (password.length > PASSWORD_MAX_LENGTH) {
+    return errorResponse(res, `Password cannot exceed ${PASSWORD_MAX_LENGTH} characters`, 400, 'VALIDATION_ERROR');
+  }
+
   // Check if user already exists
-  const existingUser = await User.findOne({ email: email.toLowerCase() });
+  const existingUser = await User.findOne({ email });
   if (existingUser) {
     return errorResponse(res, 'An account with this email address already exists', 400, 'USER_EXISTS');
   }
 
   const user = await User.create({
     name,
-    email: email.toLowerCase(),
+    email,
     password,
     role: 'user',
   });
@@ -66,11 +87,15 @@ const register = asyncHandler(async (req, res) => {
 const login = asyncHandler(async (req, res) => {
   const { email, password } = req.body;
 
-  if (!email || !password) {
+  // Strings only: an object such as {"$ne": null} must never reach the query.
+  if (!isNonEmptyString(email) || !isNonEmptyString(password)) {
     return errorResponse(res, 'Email and password are required', 400, 'MISSING_CREDENTIALS');
   }
+  if (email.length > EMAIL_MAX_LENGTH || password.length > LOGIN_PASSWORD_MAX_LENGTH) {
+    return errorResponse(res, 'Invalid email or password', 401, 'INVALID_CREDENTIALS');
+  }
 
-  const user = await User.findOne({ email: email.toLowerCase() }).select('+password');
+  const user = await User.findOne({ email: email.trim().toLowerCase() }).select('+password');
 
   if (!user) {
     return errorResponse(res, 'Invalid email or password', 401, 'INVALID_CREDENTIALS');

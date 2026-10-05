@@ -1,139 +1,147 @@
 const Redis = require('ioredis');
 
-const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
+// Redis is an optional accelerator (response cache). The API never depends on it for
+// correctness or security: when Redis is not configured or unreachable, caching
+// falls back to a bounded per-process memory store and every request still works.
 
-let redisClient = null;
-let isConnected = false;
-let fallbackMemoryCache = new Map();
+// --- Configuration -----------------------------------------------------------------
 
-try {
-  redisClient = new Redis(REDIS_URL, {
-    maxRetriesPerRequest: 1,
-    connectTimeout: 3000,
-    enableOfflineQueue: false,
-    retryStrategy(times) {
-      if (times > 3) {
-        // Stop excessive retrying to keep console clean and avoid spam
-        return null;
-      }
-      return Math.min(times * 500, 2000);
-    },
-  });
+const DEFAULT_DEV_REDIS_URL = 'redis://localhost:6379';
 
-  redisClient.on('connect', () => {
-    isConnected = true;
-    console.log(`[Redis] Connected successfully to ${REDIS_URL}`);
-  });
+// Never log credentials: drop "user:pass@" from redis:// / rediss:// URLs (also inside
+// error messages, which can echo the URL) and any query string.
+const redactRedisUrl = (value) =>
+  String(value ?? '')
+    .replace(/(rediss?:\/\/)[^@/\s]+@/gi, '$1***@')
+    .replace(/(rediss?:\/\/[^\s?]+)\?[^\s]*/gi, '$1');
 
-  redisClient.on('ready', () => {
-    isConnected = true;
-  });
-
-  redisClient.on('error', (err) => {
-    if (isConnected) {
-      console.warn(`[Redis] Runtime error: ${err.message}`);
-    }
-    isConnected = false;
-  });
-
-  redisClient.on('close', () => {
-    isConnected = false;
-  });
-} catch (err) {
-  console.warn(`[Redis] Failed to initialize client: ${err.message}`);
-  isConnected = false;
-}
-
-// In-memory fallback garbage collector
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, item] of fallbackMemoryCache.entries()) {
-    if (item.expiresAt && item.expiresAt <= now) {
-      fallbackMemoryCache.delete(key);
-    }
-  }
-}, 30000);
-
-const isRedisConnected = () => {
-  return isConnected && redisClient && redisClient.status === 'ready';
+// Which Redis URL (if any) to use for this environment:
+// - REDIS_URL set: always used.
+// - production without REDIS_URL: no Redis (explicit configuration is required; the
+//   server warns loudly instead of guessing localhost).
+// - test without REDIS_URL: no Redis, so tests never touch a developer's local data.
+// - development without REDIS_URL: the conventional local default.
+const resolveRedisUrl = (env = process.env) => {
+  const configured = typeof env.REDIS_URL === 'string' ? env.REDIS_URL.trim() : '';
+  if (configured) return configured;
+  if (env.NODE_ENV === 'production' || env.NODE_ENV === 'test') return null;
+  return DEFAULT_DEV_REDIS_URL;
 };
 
-const getCache = async (key) => {
-  try {
-    if (isRedisConnected()) {
-      const data = await redisClient.get(key);
-      return data ? JSON.parse(data) : null;
-    }
-  } catch (err) {
-    console.warn(`[Redis Cache] GET error for key ${key}: ${err.message}`);
-  }
+// Reconnect forever with capped exponential backoff, so a Redis restart is picked
+// up automatically instead of leaving the process on the memory fallback until restart.
+const retryDelayMs = (attempt) => Math.min(250 * 2 ** Math.min(attempt, 6), 10000);
 
-  // Fallback to in-memory cache
-  const item = fallbackMemoryCache.get(key);
-  if (item) {
-    if (!item.expiresAt || item.expiresAt > Date.now()) {
-      return item.value;
-    }
-    fallbackMemoryCache.delete(key);
-  }
-  return null;
+const CLIENT_OPTIONS = {
+  connectTimeout: 3000,
+  // Fail fast while disconnected (no unbounded offline queue) and bound each command,
+  // so a slow or hung Redis can never stall an API request for long.
+  enableOfflineQueue: false,
+  maxRetriesPerRequest: 1,
+  commandTimeout: 1000,
+  retryStrategy: retryDelayMs,
 };
 
-const setCache = async (key, value, ttlSeconds = 300) => {
-  try {
-    if (isRedisConnected()) {
-      await redisClient.set(key, JSON.stringify(value), 'EX', ttlSeconds);
-      return true;
-    }
-  } catch (err) {
-    console.warn(`[Redis Cache] SET error for key ${key}: ${err.message}`);
-  }
+// --- Shared client + state ------------------------------------------------------------
 
-  // Fallback to in-memory cache
-  fallbackMemoryCache.set(key, {
-    value,
-    expiresAt: ttlSeconds ? Date.now() + ttlSeconds * 1000 : null,
+let client = null;
+let configured = false;
+let ready = false;
+let loggedUnavailable = false;
+let logger = console;
+
+// Connection failures can carry an empty message (e.g. an AggregateError when
+// "localhost" resolves to both ::1 and 127.0.0.1); fall back to the error codes.
+const describeError = (err) => {
+  const nested = Array.isArray(err?.errors) ? err.errors.map((e) => e.code || e.message).filter(Boolean) : [];
+  const text = err?.message || [...new Set(nested)].join(', ') || err?.code || 'connection failed';
+  return redactRedisUrl(text);
+};
+
+const attachListeners = (redis, target) => {
+  redis.on('ready', () => {
+    ready = true;
+    loggedUnavailable = false;
+    logger.log(`[Redis] Connected to ${target}`);
   });
-  return true;
+  redis.on('error', (err) => {
+    // Log the first failure of each outage only; ioredis keeps retrying in the background.
+    if (!loggedUnavailable) {
+      loggedUnavailable = true;
+      logger.warn(`[Redis] Unavailable at ${target} (${describeError(err)}); using the process-local memory cache until it reconnects.`);
+    }
+  });
+  redis.on('close', () => {
+    if (ready) logger.warn('[Redis] Connection lost; reconnecting in the background.');
+    ready = false;
+  });
 };
 
-const deleteCache = async (key) => {
-  try {
-    if (isRedisConnected()) {
-      await redisClient.del(key);
-    }
-  } catch (err) {
-    console.warn(`[Redis Cache] DEL error for key ${key}: ${err.message}`);
+// Create the one shared client for this process (idempotent). Pass `client` to wire a
+// pre-built client (used by tests).
+const initRedis = ({ env = process.env, client: injected, log } = {}) => {
+  if (log) logger = log;
+  if (client) return client;
+
+  if (injected) {
+    client = injected;
+    configured = true;
+    ready = injected.status === 'ready';
+    attachListeners(injected, 'injected client');
+    return client;
   }
-  fallbackMemoryCache.delete(key);
+
+  const url = resolveRedisUrl(env);
+  if (!url) {
+    configured = false;
+    if (env.NODE_ENV === 'production') {
+      logger.warn('[Redis] REDIS_URL is not set: Redis disabled, responses are cached in process-local memory only.');
+    }
+    return null;
+  }
+
+  configured = true;
+  client = new Redis(url, CLIENT_OPTIONS);
+  attachListeners(client, redactRedisUrl(url));
+  return client;
 };
 
-const deletePattern = async (pattern) => {
-  try {
-    if (isRedisConnected()) {
-      const keys = await redisClient.keys(pattern);
-      if (keys.length > 0) {
-        await redisClient.del(...keys);
-      }
-    }
-  } catch (err) {
-    console.warn(`[Redis Cache] deletePattern error for ${pattern}: ${err.message}`);
-  }
+const getRedisClient = () => client;
 
-  // Fallback pattern matching
-  const regexPattern = new RegExp('^' + pattern.replace(/\*/g, '.*') + '$');
-  for (const key of fallbackMemoryCache.keys()) {
-    if (regexPattern.test(key)) {
-      fallbackMemoryCache.delete(key);
+const isRedisConnected = () => Boolean(client && ready && client.status === 'ready');
+
+// 'connected' | 'disconnected' (configured but unreachable) | 'disabled' (not configured)
+const getRedisStatus = () => {
+  if (!configured) return 'disabled';
+  return isRedisConnected() ? 'connected' : 'disconnected';
+};
+
+// Graceful shutdown: QUIT lets pending replies drain; fall back to a hard disconnect.
+const closeRedis = async () => {
+  const current = client;
+  client = null;
+  configured = false;
+  ready = false;
+  loggedUnavailable = false;
+  if (!current) return;
+  try {
+    if (current.status === 'ready') {
+      await current.quit();
+      return;
     }
+  } catch {
+    // fall through to disconnect
   }
+  current.disconnect();
 };
 
 module.exports = {
-  redisClient,
+  initRedis,
+  getRedisClient,
   isRedisConnected,
-  getCache,
-  setCache,
-  deleteCache,
-  deletePattern,
+  getRedisStatus,
+  closeRedis,
+  redactRedisUrl,
+  resolveRedisUrl,
+  retryDelayMs,
 };

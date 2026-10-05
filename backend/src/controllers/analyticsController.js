@@ -1,8 +1,26 @@
 const User = require('../models/User');
 const Event = require('../models/Event');
 const Notification = require('../models/Notification');
-const { successResponse } = require('../utils/apiResponse');
+const { successResponse, errorResponse } = require('../utils/apiResponse');
 const { asyncHandler } = require('../middleware/errorHandler');
+
+const RANGES = ['24h', '7d', '30d'];
+const SERVICES = ['auth-service', 'notification-service', 'payment-service', 'api-gateway', 'system'];
+
+// Validated { range, service } (service undefined = all). Only these finite values can
+// produce a 200, so the response cache (keyed on them) cannot be inflated with junk keys.
+const readFilters = (req, res, defaultRange, { withService = true } = {}) => {
+  const { range = defaultRange, service } = req.query;
+  if (!RANGES.includes(range)) {
+    errorResponse(res, `Invalid range. Must be one of: ${RANGES.join(', ')}`, 400, 'INVALID_QUERY');
+    return null;
+  }
+  if (withService && service !== undefined && service !== 'all' && !SERVICES.includes(service)) {
+    errorResponse(res, `Invalid service. Must be one of: all, ${SERVICES.join(', ')}`, 400, 'INVALID_QUERY');
+    return null;
+  }
+  return { range, service: withService && service !== 'all' ? service : undefined };
+};
 
 // Helper to compute date range filter
 const getDateFilter = (range) => {
@@ -23,7 +41,9 @@ const getDateFilter = (range) => {
 // @route GET /api/analytics/overview
 // @access Private
 const getOverview = asyncHandler(async (req, res) => {
-  const { range = '30d', service } = req.query;
+  const filters = readFilters(req, res, '30d');
+  if (!filters) return undefined;
+  const { range, service } = filters;
 
   const eventMatch = {};
   const notifMatch = {};
@@ -91,7 +111,9 @@ const getOverview = asyncHandler(async (req, res) => {
 // @route GET /api/analytics/timeseries
 // @access Private
 const getTimeSeries = asyncHandler(async (req, res) => {
-  const { range = '7d', service } = req.query;
+  const filters = readFilters(req, res, '7d');
+  if (!filters) return undefined;
+  const { range, service } = filters;
 
   const eventMatch = {};
   const notifMatch = {};
@@ -187,7 +209,9 @@ const getTimeSeries = asyncHandler(async (req, res) => {
 // @route GET /api/analytics/distributions
 // @access Private
 const getDistributions = asyncHandler(async (req, res) => {
-  const { range = '30d' } = req.query;
+  const filters = readFilters(req, res, '30d', { withService: false });
+  if (!filters) return undefined;
+  const { range } = filters;
 
   const eventMatch = {};
   const notifMatch = {};

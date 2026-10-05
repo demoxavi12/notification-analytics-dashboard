@@ -30,24 +30,24 @@ const stop = async () => {
   if (server) await new Promise((resolve) => server.close(resolve));
   await mongoose.disconnect();
   if (mongo) await mongo.stop();
-  // The Redis client is created at import time; close it so the process can exit.
-  const { redisClient } = require('../src/config/redis');
-  if (redisClient) redisClient.disconnect();
+  // Close any Redis client a test wired up so the process can exit.
+  await require('../src/config/redis').closeRedis();
 };
 
 const tokenFor = (user) => jwt.sign({ id: user._id.toString() }, process.env.JWT_SECRET, { expiresIn: '1h' });
 
-const request = async (method, path, { token, body } = {}) => {
+const request = async (method, path, { token, body, headers } = {}) => {
   const res = await fetch(`${baseUrl}${path}`, {
     method,
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...headers,
     },
     body: body ? JSON.stringify(body) : undefined,
   });
   const json = await res.json().catch(() => null);
-  return { status: res.status, body: json };
+  return { status: res.status, body: json, headers: res.headers };
 };
 
 module.exports = { start, stop, tokenFor, request };

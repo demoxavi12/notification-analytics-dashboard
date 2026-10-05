@@ -6,13 +6,14 @@ const {
   getDistributions,
 } = require('../controllers/analyticsController');
 const { authenticate } = require('../middleware/auth');
-const { cacheMiddleware } = require('../middleware/cache');
+const { cacheMiddleware, CACHE_TTL_SECONDS } = require('../middleware/cache');
 
 router.use(authenticate);
 
-// Analytics endpoints with Redis/in-memory caching
-router.get('/overview', cacheMiddleware(60, 'cache:analytics:overview'), getOverview);
-router.get('/timeseries', cacheMiddleware(60, 'cache:analytics:timeseries'), getTimeSeries);
-router.get('/distributions', cacheMiddleware(60, 'cache:analytics:distributions'), getDistributions);
+// Cached per authorization scope; `varyBy` must list every query param the controller reads.
+const ttlSeconds = CACHE_TTL_SECONDS.analytics;
+router.get('/overview', cacheMiddleware({ resource: 'analytics:overview', ttlSeconds, varyBy: ['range', 'service'] }), getOverview);
+router.get('/timeseries', cacheMiddleware({ resource: 'analytics:timeseries', ttlSeconds, varyBy: ['range', 'service'] }), getTimeSeries);
+router.get('/distributions', cacheMiddleware({ resource: 'analytics:distributions', ttlSeconds, varyBy: ['range'] }), getDistributions);
 
 module.exports = router;

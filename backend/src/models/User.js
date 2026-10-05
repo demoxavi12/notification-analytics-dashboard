@@ -1,6 +1,12 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
+// Same pragmatic rule as the frontend: one "@", no whitespace, a dotted domain and a
+// 2+ letter TLD. Domain segments exclude "." so each dot is a single, unambiguous
+// split point: matching stays linear instead of backtracking exponentially.
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@.]+(\.[^\s@.]+)*\.[A-Za-z]{2,}$/;
+const EMAIL_MAX_LENGTH = 254;
+
 const userSchema = new mongoose.Schema(
   {
     name: {
@@ -15,10 +21,10 @@ const userSchema = new mongoose.Schema(
       unique: true,
       lowercase: true,
       trim: true,
-      match: [
-        /^\w+([.-]?\w+)*@\w+([.-]?\w+)*(\.\w{2,})+$/,
-        'Please provide a valid email address',
-      ],
+      maxlength: [EMAIL_MAX_LENGTH, `Email cannot exceed ${EMAIL_MAX_LENGTH} characters`],
+      // Linear-time pattern (the previous nested-quantifier regex backtracked
+      // exponentially: ~30 characters blocked the event loop for ~30 seconds).
+      match: [EMAIL_PATTERN, 'Please provide a valid email address'],
     },
     password: {
       type: String,
@@ -66,3 +72,5 @@ userSchema.methods.comparePassword = async function (candidatePassword) {
 const User = mongoose.model('User', userSchema);
 
 module.exports = User;
+module.exports.EMAIL_PATTERN = EMAIL_PATTERN;
+module.exports.EMAIL_MAX_LENGTH = EMAIL_MAX_LENGTH;

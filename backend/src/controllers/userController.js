@@ -1,15 +1,14 @@
 const User = require('../models/User');
 const { successResponse, errorResponse, paginatedResponse } = require('../utils/apiResponse');
 const { asyncHandler } = require('../middleware/errorHandler');
-const { queryString, escapeRegex } = require('../utils/queryInput');
+const { queryString, escapeRegex, parsePagination } = require('../utils/queryInput');
+const { invalidateCacheFor } = require('../middleware/cache');
 
 // @desc Get all users (Admin only)
 // @route GET /api/users
 // @access Private/Admin
 const getAllUsers = asyncHandler(async (req, res) => {
-  const page = parseInt(req.query.page, 10) || 1;
-  const limit = parseInt(req.query.limit, 10) || 10;
-  const skip = (page - 1) * limit;
+  const { page, limit, skip } = parsePagination(req.query);
   const role = queryString(req.query.role);
   const search = queryString(req.query.search);
 
@@ -72,6 +71,9 @@ const updateUserRole = asyncHandler(async (req, res) => {
   if (!user) {
     return errorResponse(res, 'User not found', 404, 'USER_NOT_FOUND');
   }
+
+  // Cache scopes follow the role; drop anything cached under the user's old scope.
+  await invalidateCacheFor({ userIds: [user._id] });
 
   return successResponse(res, { user }, `User role updated to ${role}`);
 });

@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const { buildCorsOptions } = require('./config/cors');
+const { resolveTrustProxy } = require('./config/proxy');
 
 // Express application (routes + middleware) without side effects: no database
 // connection, no listening socket. server.js wires those up; tests mount this directly.
@@ -19,12 +20,17 @@ const analyticsRoutes = require('./routes/analyticsRoutes');
 
 const app = express();
 
+// Client IP resolution for rate limiting (see config/proxy.js).
+app.set('trust proxy', resolveTrustProxy());
+
 // CORS: configured origins only (see config/cors.js); never "allow everything".
 app.use(cors(buildCorsOptions()));
 
 // Standard Body Parsers
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// The largest legitimate payload is an event with up to 16 KB of metadata (see
+// utils/queryInput.js), so 100 KB leaves ample headroom while bounding abuse.
+app.use(express.json({ limit: '100kb' }));
+app.use(express.urlencoded({ extended: false, limit: '100kb' }));
 
 // Root welcome route
 app.get('/', (req, res) => {

@@ -2,15 +2,30 @@ const { errorResponse } = require('../utils/apiResponse');
 
 // 404 Not Found Middleware
 const notFoundHandler = (req, res, next) => {
-  return errorResponse(res, `Route not found: ${req.method} ${req.originalUrl}`, 404, 'NOT_FOUND');
+  // Path only: never echo the query string (it may carry tokens or junk input).
+  return errorResponse(res, `Route not found: ${req.method} ${req.path}`, 404, 'NOT_FOUND');
 };
 
 // Global Error Handler Middleware
 const errorHandler = (err, req, res, next) => {
-  let statusCode = err.statusCode || 500;
+  let statusCode = err.statusCode || err.status || 500;
   let message = err.message || 'Internal Server Error';
-  let errorCode = err.code || 'SERVER_ERROR';
+  let errorCode = typeof err.code === 'string' ? err.code : 'SERVER_ERROR';
   let details = err.details || null;
+
+  // Body parser failures (express.json): report the problem, not parser internals.
+  if (err.type === 'entity.too.large') {
+    statusCode = 413;
+    message = 'Request body is too large';
+    errorCode = 'PAYLOAD_TOO_LARGE';
+  } else if (err.type === 'entity.parse.failed') {
+    statusCode = 400;
+    message = 'Request body is not valid JSON';
+    errorCode = 'INVALID_JSON';
+  } else if (err.type && statusCode < 500) {
+    message = 'Invalid request body';
+    errorCode = 'INVALID_REQUEST';
+  }
 
   // Handle Mongoose Bad ObjectId (CastError)
   if (err.name === 'CastError') {
@@ -48,8 +63,15 @@ const errorHandler = (err, req, res, next) => {
     errorCode = 'TOKEN_EXPIRED';
   }
 
-  if (process.env.NODE_ENV === 'development' && statusCode === 500) {
-    console.error('[Error Details]:', err);
+  if (statusCode >= 500) {
+    // Unexpected failures can carry driver messages, connection strings, file paths or
+    // query details: log server-side (stack only in development), never send them.
+    if (process.env.NODE_ENV === 'development') {
+      console.error('[Error Details]:', err);
+    } else if (process.env.NODE_ENV !== 'test') {
+      console.error(`[Error] ${err.name || 'Error'} on ${req.method} ${req.path}`);
+    }
+    return errorResponse(res, 'Internal Server Error', statusCode, 'SERVER_ERROR');
   }
 
   return errorResponse(res, message, statusCode, errorCode, details);

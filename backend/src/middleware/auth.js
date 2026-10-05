@@ -24,7 +24,8 @@ const authenticate = async (req, res, next) => {
   }
 
   try {
-    const decoded = jwt.verify(token, getJwtSecret());
+    // Pin the algorithm we sign with; never accept "none" or other algorithms.
+    const decoded = jwt.verify(token, getJwtSecret(), { algorithms: ['HS256'] });
 
     const user = await User.findById(decoded.id).select('+password');
     if (!user) {
